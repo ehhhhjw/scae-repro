@@ -1,0 +1,11 @@
+# SCAE 复现依赖 —— 刻意保持极简：纯 CPU，无 GPU，无深度学习框架。
+#
+# 论文的估计器与统计检验全部手写（贝叶斯 logistic 用 IRLS + Laplace 近似，
+# 置换检验/bootstrap/Spearman/BH-FDR 都是 stdlib 或 numpy 实现），
+# 因此不需要 scipy / statsmodels / sklearn / torch。
+
+numpy>=1.24
+
+# 可选：只有 setup/prepare_dataset.py --from-hf 需要，用来拉 SWE-bench-Verified。
+# 若你已有本地 JSON 快照（--from-json），则完全不需要。
+# datasets>=2.14
