@@ -1,28 +1,29 @@
-"""X4（零 API，V4′ 后）：U^exec（真实重放方差） ↔ 有效结构量 H_tool + H_prov。
+"""X4 (zero API, post-V4′): U^exec (true replay variance) ↔ effective structural quantity H_tool + H_prov.
 
-命题
-----
-L1 的预测熵能代理重放方差。
+Proposition
+-----------
+L1's predictive entropy can proxy replay variance.
 
-被估量
-------
-corr(H_tool_t + H_prov_t, U^exec_t)，Spearman + bootstrap CI；
-偏相关：H_tool 单独，H_prov 单独；
-**负面对照**：同时报已失效的 u_obj（4·v̂·(1−v̂) 的 Bernoulli 近似，预期不显著）。
+Estimand
+--------
+corr(H_tool_t + H_prov_t, U^exec_t), Spearman + bootstrap CI;
+partial correlations: H_tool alone, H_prov alone;
+**negative control**: also report the invalidated u_obj (the Bernoulli approximation
+4·v̂·(1−v̂), expected non-significant).
 
-V4′ 数据的 U^exec 定义
------------------------
-segments[i]["ys_t"]   → m 次重放的 recall 值（长度 m）
-U^exec_t = Var(ys_t)   真实方差，不需要 Bernoulli 假设
+U^exec definition for the V4′ data
+----------------------------------
+segments[i]["ys_t"]   → recall values over m replays (length m)
+U^exec_t = Var(ys_t)   true variance, no Bernoulli assumption needed
 
-对照组（已失效 V4 的 U^exec_legacy）：
+Control group (U^exec_legacy from the invalidated V4):
 U^exec_legacy_t = 4 * v_hat_t * (1 - v_hat_t)
 
-三档判据（RESEARCH_PLAN_v5 X4）
--------------------------------
-| ρ ≥ 0.4 显著     | 廉价量可代理昂贵重放 → 论文主结论                       |
-| 0.2 ≤ ρ < 0.4    | 辅助信号，需与重放联合                                   |
-| ρ 不显著          | 先查 U^exec 本身是否有可检出结构（否则记为功效不足）      |
+Three-tier criterion (RESEARCH_PLAN_v5 X4)
+------------------------------------------
+| ρ ≥ 0.4, significant | cheap quantity can proxy expensive replay → main claim of the paper                |
+| 0.2 ≤ ρ < 0.4        | auxiliary signal, must be combined with replay                                     |
+| ρ not significant    | first check whether U^exec itself has detectable structure (else insufficient power) |
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ SEED = 20260814
 
 def boot_ci(vals: list[float], b: int = 2000, seed: int = SEED) -> dict:
     if not vals:
-        return {"note": "无样本"}
+        return {"note": "no samples"}
     rng = random.Random(seed)
     pts = []
     for _ in range(b):
@@ -87,7 +88,7 @@ def _pearson(a: list[float], b_: list[float]) -> float:
 
 def spearman_boot(xs: list[float], ys: list[float], b: int = 4000) -> dict:
     if len(xs) < 5:
-        return {"note": "样本不足"}
+        return {"note": "insufficient samples"}
     rho = _pearson(_rankdata(xs), _rankdata(ys))
     rng = random.Random(SEED)
     pts = []
@@ -103,7 +104,7 @@ def spearman_boot(xs: list[float], ys: list[float], b: int = 4000) -> dict:
 
 
 def partial_spearman(x: list[float], y: list[float], z: list[float]) -> dict:
-    """Partial Spearman corr(x, y | z) 的近似（用残差排名法）。"""
+    """Approximation of partial Spearman corr(x, y | z) (via residual ranking)."""
     def ols_residual(dep: list[float], ind: list[float]) -> list[float]:
         n = len(dep)
         if n < 3:
@@ -123,36 +124,36 @@ def partial_spearman(x: list[float], y: list[float], z: list[float]) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--v4prime-dir", default="pilot/runs/v4prime",
-                    help="V4′ 分片目录（含 shard0..5/attribution.jsonl）")
+                    help="V4′ shard directory (contains shard0..5/attribution.jsonl)")
     ap.add_argument("--tool-model", default="pilot/runs/tool_model_official.json")
     ap.add_argument("--runs-root", default="pilot/runs/full_locate")
     ap.add_argument("--out", default="pilot/runs/x4_uexec_corr.json")
     args = ap.parse_args()
 
-    # ---- 1. 载入工具熵 ----
+    # ---- 1. Load tool entropy ----
     tm = json.loads(Path(args.tool_model).read_text())
     h_tool_idx: dict[tuple[str, int], float] = {
         (row["instance_id"], row["t"]): row["H_tool"]
         for row in tm.get("entropy_rows", [])
     }
-    H_PROV_EFF = 3.46   # 来自 v3j prov_lastout_ranked 的全局值
+    H_PROV_EFF = 3.46   # global value from v3j prov_lastout_ranked
     H_PROV = math.log(H_PROV_EFF)   # ≈ 1.241
-    print(f"H_tool 步: {len(h_tool_idx)},  H_prov 全局: {H_PROV:.4f}")
+    print(f"H_tool steps: {len(h_tool_idx)},  H_prov global: {H_PROV:.4f}")
 
-    # ---- 2. 载入 V4′ attribution ----
+    # ---- 2. Load V4′ attribution ----
     recs: list[dict] = []
     v4p = Path(args.v4prime_dir)
     for f in sorted(v4p.glob("shard*/attribution.jsonl")):
         for line in f.read_text().splitlines():
             if line.strip():
                 recs.append(json.loads(line))
-    print(f"V4′ 归因记录: {len(recs)}")
+    print(f"V4′ attribution records: {len(recs)}")
 
     if not recs:
-        print("⚠️  V4′ 归因尚无数据。请等 V4′ 完成后重跑本脚本。")
+        print("⚠️  No V4′ attribution data yet. Wait for V4′ to finish, then rerun this script.")
         return 1
 
-    # ---- 3. 逐段构建 (H_struct, U^exec, U^exec_legacy) 三元组 ----
+    # ---- 3. Build the (H_struct, U^exec, U^exec_legacy) triple per segment ----
     rows: list[dict] = []
     for r in recs:
         iid = r["instance_id"]
@@ -163,15 +164,15 @@ def main() -> int:
             v_t = seg.get("v_t")
             if not ys_t or v_t is None or t is None:
                 continue
-            # 真实 U^exec = Var(ys)
+            # true U^exec = Var(ys)
             if len(ys_t) < 2:
                 continue
-            u_exec = statistics.variance(ys_t)  # 真实重放方差
-            # 遗留的 Bernoulli 近似（V4 的错误方法，作负面对照）
+            u_exec = statistics.variance(ys_t)  # true replay variance
+            # legacy Bernoulli approximation (V4's wrong method, kept as negative control)
             u_exec_legacy = 4.0 * v_t * (1.0 - v_t)
-            # H_tool（逐步）
+            # H_tool (per step)
             h_t = h_tool_idx.get((iid, t))
-            # H_struct = H_tool + H_prov（使用全局 H_prov 作为每步代理）
+            # H_struct = H_tool + H_prov (global H_prov used as the per-step proxy)
             h_struct = (h_t + H_PROV) if h_t is not None else None
             rows.append({
                 "iid": iid, "t": t,
@@ -183,9 +184,9 @@ def main() -> int:
 
     n_rows = len(rows)
     n_with_h = sum(1 for r in rows if r["h_struct"] is not None)
-    print(f"逐段记录: {n_rows}, 其中有 H_tool: {n_with_h}")
+    print(f"per-segment records: {n_rows}, of which with H_tool: {n_with_h}")
 
-    # ---- 4. 主相关：H_struct ~ U^exec ----
+    # ---- 4. Main correlation: H_struct ~ U^exec ----
     pairs_struct = [(r["h_struct"], r["u_exec"]) for r in rows if r["h_struct"] is not None]
     pairs_htool = [(r["h_tool"], r["u_exec"]) for r in rows if r["h_tool"] is not None]
     pairs_legacy = [(r["h_struct"], r["u_exec_legacy"]) for r in rows if r["h_struct"] is not None]
@@ -197,7 +198,7 @@ def main() -> int:
     corr_legacy = spearman_boot([x for x, _ in pairs_legacy],
                                 [y for _, y in pairs_legacy])
 
-    # ---- 5. U^exec 的自身结构（功效检验，坑 #22）----
+    # ---- 5. U^exec's own structure (power check, pitfall #22) ----
     all_u_exec = [r["u_exec"] for r in rows]
     u_exec_stats = {
         "n": len(all_u_exec),
@@ -208,15 +209,15 @@ def main() -> int:
         "nonzero_rate": round(sum(1 for x in all_u_exec if x > 1e-9) / len(all_u_exec), 4),
     }
 
-    # U^exec ~ delta（效应应与方差相关）
+    # U^exec ~ delta (the effect should correlate with the variance)
     pairs_d = [(abs(r["delta"]), r["u_exec"]) for r in rows]
     corr_delta = spearman_boot([x for x, _ in pairs_d], [y for _, y in pairs_d])
 
-    # U^exec ~ v_t（均值-方差关系）
+    # U^exec ~ v_t (mean-variance relation)
     pairs_vt = [(r["v_t"], r["u_exec"]) for r in rows]
     corr_vt = spearman_boot([x for x, _ in pairs_vt], [y for _, y in pairs_vt])
 
-    # ---- 6. 偏相关（控制 v_t 后 H_tool 与 U^exec 的关系）----
+    # ---- 6. Partial correlation (H_tool vs U^exec after controlling for v_t) ----
     common = [(r["h_tool"], r["u_exec"], r["v_t"])
               for r in rows if r["h_tool"] is not None]
     if len(common) >= 10:
@@ -225,9 +226,9 @@ def main() -> int:
             [y for _, y, _ in common],
             [z for _, _, z in common])
     else:
-        partial = {"note": "样本不足"}
+        partial = {"note": "insufficient samples"}
 
-    # ---- 7. 分层（按 delta 大小分三层）----
+    # ---- 7. Stratification (three layers by delta magnitude) ----
     rows_sorted_d = sorted(rows, key=lambda r: abs(r["delta"]))
     n3 = len(rows_sorted_d) // 3
     layer_corrs = {}
@@ -235,7 +236,7 @@ def main() -> int:
                          ("delta_mid_33pct", rows_sorted_d[n3:2 * n3]),
                          ("delta_high_33pct", rows_sorted_d[2 * n3:])):
         p = [(r["h_struct"], r["u_exec"]) for r in subset if r["h_struct"] is not None]
-        layer_corrs[name] = spearman_boot([x for x, _ in p], [y for _, y in p]) if len(p) >= 10 else {"note": "样本不足"}
+        layer_corrs[name] = spearman_boot([x for x, _ in p], [y for _, y in p]) if len(p) >= 10 else {"note": "insufficient samples"}
 
     res = {
         "n_rows": n_rows,
@@ -245,12 +246,12 @@ def main() -> int:
             "H_struct_vs_U_exec": corr_struct,
             "H_tool_only_vs_U_exec": corr_htool,
             "H_struct_vs_U_exec_LEGACY": corr_legacy,
-            "note_legacy": "V4 的 Bernoulli 近似（已失效，作负面对照）",
+            "note_legacy": "V4's Bernoulli approximation (invalidated, kept as negative control)",
         },
         "POWER_CHECK_U_exec": {
             "abs_delta_vs_U_exec": corr_delta,
             "v_t_vs_U_exec": corr_vt,
-            "note": "若 U^exec 对位置/效应均无结构，负面结论只反映功效不足",
+            "note": "if U^exec has no structure w.r.t. position or effect, the negative result only reflects insufficient power",
         },
         "partial_spearman_H_tool_vs_Uexec_given_vt": partial,
         "stratified_by_delta_magnitude": layer_corrs,
@@ -259,8 +260,8 @@ def main() -> int:
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    print(f"\n=== X4：U^exec ↔ 结构熵相关性 ===")
-    print(f"U^exec 均值={u_exec_stats['mean']:.6f}, 非零率={u_exec_stats['nonzero_rate']:.3f}")
+    print(f"\n=== X4: U^exec ↔ structural entropy correlation ===")
+    print(f"U^exec mean={u_exec_stats['mean']:.6f}, nonzero rate={u_exec_stats['nonzero_rate']:.3f}")
     print()
     mc = res["MAIN_CORRELATIONS"]
     for k, v in mc.items():
@@ -274,7 +275,7 @@ def main() -> int:
         if k == "note" or "note" in v:
             continue
         sig = "SIGNIFICANT" if v.get("significant") else "n.s."
-        print(f"  功效 {k}: rho={v['rho']:+.4f} CI{v['ci95']} [{sig}]")
+        print(f"  power {k}: rho={v['rho']:+.4f} CI{v['ci95']} [{sig}]")
     print(f"\n→ {args.out}")
     return 0
 

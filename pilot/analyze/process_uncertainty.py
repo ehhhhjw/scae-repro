@@ -1,27 +1,27 @@
-"""过程不确定性量化 + 成功/失败分层归因 —— UQ 主线的正确落点。
+"""Process uncertainty quantification + outcome-stratified attribution -- the right home for the UQ line.
 
-设计修正记录
-------------
-早期两次尝试都把 UQ 绑在"跨 episode 预测二元成败 Y"上：
-  (1) v_0（执行前特征）→ LORO AUROC ≈ 0.5
-  (2) anytime 前缀特征 → bootstrap CI 全部含 0.5
-根本障碍是 94% 成功率下仅 30 个失败样本，判别边界学不出来。
+Design correction log
+---------------------
+Two earlier attempts both tied UQ to "predicting the binary outcome Y across episodes":
+  (1) v_0 (pre-execution features) → LORO AUROC ≈ 0.5
+  (2) anytime prefix features → all bootstrap CIs contain 0.5
+The fundamental obstacle: with a 94% success rate there are only 30 failed samples, so no discriminative boundary can be learned.
 
-正确落点：不确定性来自**单次执行的重放方差**，而非跨 episode 的成败标签。
-v̂_t 由 m 次 fork 重放估计，v̂_t=1 表示从该前缀必定成功（零不确定性），
-v̂_t≈0.5 表示一半重放成功（最大不确定性）。每个 episode 都有此量，无论成败。
+Correct home: uncertainty comes from the **replay variance of a single execution**, not from cross-episode outcome labels.
+v̂_t is estimated from m fork replays; v̂_t=1 means success is certain from that prefix (zero uncertainty),
+v̂_t≈0.5 means half the replays succeed (maximum uncertainty). Every episode has this quantity, whatever the outcome.
 
-三个可报告的量
---------------
-  U1 过程熵轨迹  H(v̂_t)：不确定性随执行的演化（"第几步收敛"）
-  U2 脆弱成功率  Y=1 且 ∃t: v̂_t < 1−ε：成功但重放不稳 —— 结果导向评测的盲区
-  U3 收敛点 t*   v̂_t 末次跨越阈值后不再回落的步位
+Three reportable quantities
+---------------------------
+  U1 process entropy trace  H(v̂_t): how uncertainty evolves along execution ("at which step it converges")
+  U2 fragile success rate   Y=1 and ∃t: v̂_t < 1−ε: succeeded but replay-unstable -- a blind spot of outcome-only evaluation
+  U3 convergence point t*   step position after which v̂_t last crosses the threshold and never dips back
 
-归因分层（成功 case 同样归因）
-------------------------------
-失败 case：argmin_t Δ̂_t —— 最伤结果的步
-成功 case：argmax_t Δ̂_t —— 最关键的正向步
-两者都由同一 Theorem 1 分解给出，无需失败样本作为前提。
+Attribution stratified by outcome (successful cases are attributed too)
+-----------------------------------------------------------------------
+Failed case: argmin_t Δ̂_t -- the step that hurt the outcome most
+Successful case: argmax_t Δ̂_t -- the most decisive positive step
+Both come from the same Theorem 1 decomposition; failed samples are not a prerequisite.
 """
 
 from __future__ import annotations
@@ -47,10 +47,10 @@ def binary_entropy(p: float) -> float:
 
 
 def reconstruct_traj(rec: dict) -> list[tuple[int, float]] | None:
-    """从 causal_v0 + 累加 delta 还原 v̂_t 轨迹。
+    """Reconstruct the v̂_t trace from causal_v0 plus cumulative deltas.
 
-    causal_segments 只持久化了 delta（实现时的字段缺口），但
-    delta_i = v̂_{t_i} − v̂_{t_{i-1}}，故 v̂ 可由 v0 累加还原。
+    causal_segments only persists delta (a field gap in the implementation), but
+    delta_i = v̂_{t_i} − v̂_{t_{i-1}}, so v̂ can be recovered by accumulating from v0.
     """
     v = rec.get("causal_v0")
     if v is None:
@@ -83,7 +83,7 @@ def analyze(recs: list[dict], eps: float = 1e-3, theta: float = 0.9) -> dict:
     succ = [r for r in ok if r.get("Y") == 1]
     fail = [r for r in ok if r.get("Y") == 0]
 
-    # ---------------- U1 过程熵轨迹 ----------------
+    # ---------------- U1 process entropy trace ----------------
     ent_bins: dict[float, list[float]] = defaultdict(list)
     for r in ok:
         n = max(1, r.get("n_steps", 1))
@@ -95,7 +95,7 @@ def analyze(recs: list[dict], eps: float = 1e-3, theta: float = 0.9) -> dict:
         pt, lo, hi = bootstrap_ci(ent_bins[b])
         u1.append({"pos": b, "n": len(ent_bins[b]), "mean_H": pt, "ci95": [lo, hi]})
 
-    # ---------------- U2 脆弱成功 ----------------
+    # ---------------- U2 fragile success ----------------
     frag_flags = []
     frag_min_v = []
     for r in succ:
@@ -106,7 +106,7 @@ def analyze(recs: list[dict], eps: float = 1e-3, theta: float = 0.9) -> dict:
             frag_min_v.append(min(vs))
     fr, flo, fhi = bootstrap_ci(frag_flags)
 
-    # ---------------- U3 收敛点 ----------------
+    # ---------------- U3 convergence point ----------------
     conv = []
     for r in ok:
         tr = reconstruct_traj(r)
@@ -115,7 +115,7 @@ def analyze(recs: list[dict], eps: float = 1e-3, theta: float = 0.9) -> dict:
         for t, v in tr:
             if v < theta:
                 last_below = t
-        # 末次低于阈值之后的第一个点即收敛点；若从未低于则 0
+        # the first point after the last dip below the threshold is the convergence point; 0 if it never dips
         if last_below is None:
             conv.append(0.0)
         else:
@@ -123,7 +123,7 @@ def analyze(recs: list[dict], eps: float = 1e-3, theta: float = 0.9) -> dict:
             conv.append((after[0] if after else n) / n)
     cpt, clo, chi = bootstrap_ci(conv)
 
-    # ---------------- 归因分层（成功 case 同样归因）----------------
+    # ---------------- attribution stratified by outcome (successful cases too) ----------------
     def top_step(r: dict, mode: str):
         segs = [s for s in r.get("causal_segments", []) if s.get("delta") is not None]
         if not segs:
@@ -152,7 +152,7 @@ def analyze(recs: list[dict], eps: float = 1e-3, theta: float = 0.9) -> dict:
                     else "argmax (most decisive positive step)",
         }
 
-    # v̂_t 取值分布（暴露 m 的粒度）
+    # distribution of v̂_t values (exposes the granularity of m)
     allv = [v for r in ok for _, v in reconstruct_traj(r)]
     return {
         "n_episodes": len(ok),
@@ -188,24 +188,24 @@ def main() -> int:
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    print(f"=== 过程不确定性（n={res['n_episodes']}: "
-          f"成功 {res['n_succeeded']}, 失败 {res['n_failed']}）===")
-    print("\nU1 熵轨迹 H(v̂_t):")
+    print(f"=== process uncertainty (n={res['n_episodes']}: "
+          f"succeeded {res['n_succeeded']}, failed {res['n_failed']})===")
+    print("\nU1 entropy trace H(v̂_t):")
     for e in res["U1_entropy_trajectory"]:
         print(f"  pos={e['pos']:.2f}  n={e['n']:>3}  H={e['mean_H']:.4f}  CI={e['ci95']}")
     u2 = res["U2_fragile_success"]
-    print(f"\nU2 脆弱成功率: {u2['rate']:.1%}  CI={u2['ci95']}  "
+    print(f"\nU2 fragile success rate: {u2['rate']:.1%}  CI={u2['ci95']}  "
           f"({u2['n_fragile']}/{u2['n_success']})")
-    print(f"   脆弱者的最低 v̂: {u2['mean_min_v_among_fragile']}")
+    print(f"   lowest v̂ among fragile: {u2['mean_min_v_among_fragile']}")
     u3 = res["U3_convergence_point"]
-    print(f"\nU3 收敛点(归一化): {u3['mean_normalized']}  CI={u3['ci95']}  θ={u3['theta']}")
-    print("\n归因分层（成功 case 同样归因）:")
+    print(f"\nU3 convergence point (normalized): {u3['mean_normalized']}  CI={u3['ci95']}  θ={u3['theta']}")
+    print("\nAttribution stratified by outcome (successful cases too):")
     for k, v in res["attribution_by_outcome"].items():
-        print(f"  {k:<10} n={v['n']:>2}  非零top占比={v['nonzero_frac']}  "
+        print(f"  {k:<10} n={v['n']:>2}  nonzero_top_frac={v['nonzero_frac']}  "
               f"mean|top Δ|={v['mean_top_delta']} CI={v['delta_ci95']}  "
-              f"步位={v['mean_top_pos']} CI={v['pos_ci95']}")
+              f"pos={v['mean_top_pos']} CI={v['pos_ci95']}")
         print(f"             ({v['mode']})")
-    print(f"\nv̂_t 取值档位数 {len(res['v_hat_value_counts'])} → m 的粒度限制")
+    print(f"\nv̂_t distinct value levels {len(res['v_hat_value_counts'])} → granularity limited by m")
     print(f"\n→ {args.out}")
     return 0
 

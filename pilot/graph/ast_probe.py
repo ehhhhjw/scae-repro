@@ -1,24 +1,32 @@
-"""AST 特征的判别性检验 —— 先验证再投入。
+"""Discriminativeness test for AST features -- verify before investing.
 
-在为 499 个仓库全量建索引（预计 20+ 分钟）之前，先在子集上回答一个问题：
-**AST 语义特征能否区分成功与失败的定位任务？**
+Before building a full index over 499 repositories (an estimated 20+ minutes), answer one
+question on a subset first:
+**can AST semantic features separate successful from failed localization tasks?**
 
-若不能，AST 路线与之前的行为表层特征同样无效，不值得全量投入。
-若能，则说明前三次预测失败确实源于「缺语义」而非「任务不可预测」。
+If not, the AST route is just as useless as the earlier surface behavioral features and is not
+worth the full investment.
+If yes, then the three prior prediction failures really did stem from "missing semantics" rather
+than "the task is unpredictable".
 
-检验设计
---------
-取全部失败 case（30 个）+ 等量分层抽样的成功 case，对每个实例：
-  1. 从 issue 文本抽候选符号（大写驼峰 / snake_case 标识符）
-  2. 用 AST 索引测这些符号的歧义度（定义点数、最大重名、命中文件数、目录分散度）
-  3. 额外测 gold 文件在依赖图中的结构位置（入度、出度、是否叶子）
-     —— 注意：gold 结构特征**仅用于解释性分析**，不能进预测特征（会泄漏）
-  4. 对比成功组 vs 失败组的分布，报 Mann-Whitney U 与效应量
+Test design
+-----------
+Take all failure cases (30) + an equal number of stratified-sampled success cases; for each instance:
+  1. extract candidate symbols from the issue text (CamelCase / snake_case identifiers)
+  2. measure the ambiguity of those symbols with the AST index (number of definition sites,
+     max name collisions, number of files hit, directory spread)
+  3. additionally measure the structural position of the gold files in the dependency graph
+     (in-degree, out-degree, leaf or not)
+     -- note: gold structural features are **for explanatory analysis only** and must not enter
+     the predictive features (they would leak)
+  4. compare the distributions of the success group vs the failure group, report Mann-Whitney U
+     and the effect size
 
-严格区分两类特征
-----------------
-  可预测用（execution-time available）：仅由 issue 文本 + 仓库 AST 计算，不含 gold
-  仅解释用（post-hoc only）：涉及 F* 的结构位置，用于理解失败机制，不进模型
+Strict separation of two feature classes
+----------------------------------------
+  predictive (execution-time available): computed only from issue text + repository AST, no gold
+  explanatory only (post-hoc only): involves the structural position of F*, used to understand the
+  failure mechanism, never enters the model
 """
 
 from __future__ import annotations
@@ -46,7 +54,7 @@ _STOP = {"self", "none", "true", "false", "return", "import", "class", "print",
 
 
 def issue_symbols(text: str, limit: int = 25) -> list[str]:
-    """从 issue 文本抽候选符号。只用文本，不看仓库、不看 gold。"""
+    """Extract candidate symbols from the issue text. Text only, no repository, no gold."""
     cams = _CAMEL.findall(text or "")
     snakes = [w for w in _SNAKE.findall(text or "") if w not in _STOP]
     cnt = Counter(cams + snakes)
@@ -54,11 +62,11 @@ def issue_symbols(text: str, limit: int = 25) -> list[str]:
 
 
 def mann_whitney_u(a: list[float], b: list[float]) -> dict:
-    """Mann-Whitney U（正态近似）+ 效应量 rank-biserial r。无 scipy 依赖。"""
+    """Mann-Whitney U (normal approximation) + rank-biserial r effect size. No scipy dependency."""
     a, b = [x for x in a if x is not None], [x for x in b if x is not None]
     na, nb = len(a), len(b)
     if na < 5 or nb < 5:
-        return {"n_a": na, "n_b": nb, "note": "样本不足"}
+        return {"n_a": na, "n_b": nb, "note": "insufficient samples"}
     allv = [(v, 0) for v in a] + [(v, 1) for v in b]
     allv.sort(key=lambda x: x[0])
     ranks = [0.0] * len(allv)
@@ -77,7 +85,7 @@ def mann_whitney_u(a: list[float], b: list[float]) -> dict:
     sd = math.sqrt(na * nb * (na + nb + 1) / 12)
     z = (ua - mu) / sd if sd else 0.0
     p = 2 * (1 - 0.5 * (1 + math.erf(abs(z) / math.sqrt(2))))
-    r_rb = 2 * ua / (na * nb) - 1          # rank-biserial，范围 [-1,1]
+    r_rb = 2 * ua / (na * nb) - 1          # rank-biserial, range [-1,1]
     return {"n_a": na, "n_b": nb,
             "median_a": round(statistics.median(a), 3),
             "median_b": round(statistics.median(b), 3),
@@ -89,7 +97,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", default="pilot/runs/full_locate/results.jsonl")
     ap.add_argument("--n-success", type=int, default=40,
-                    help="抽多少成功 case 作对照")
+                    help="how many success cases to sample as control")
     ap.add_argument("--out", default="pilot/runs/ast_probe.json")
     args = ap.parse_args()
 
@@ -98,7 +106,7 @@ def main() -> int:
     ok = [r for r in recs if r.get("ok")]
     fails = [r for r in ok if r.get("Y") == 0]
     succs = [r for r in ok if r.get("Y") == 1]
-    # 分层抽成功对照：按 repo 与 gold 数尽量匹配失败组
+    # stratified sampling of success controls: match the failure group on repo and gold count as far as possible
     key = lambda r: (r.get("project"), min(r.get("n_gold", 1), 3))          # noqa: E731
     want = Counter(key(r) for r in fails)
     picked, pool = [], sorted(succs, key=lambda r: r["instance_id"])
@@ -113,7 +121,7 @@ def main() -> int:
     picked = picked[: args.n_success]
 
     target = fails + picked
-    print(f"检验样本: 失败 {len(fails)} + 成功 {len(picked)} = {len(target)}")
+    print(f"test sample: fail {len(fails)} + success {len(picked)} = {len(target)}")
 
     rows = []
     for i, r in enumerate(target, 1):
@@ -126,7 +134,7 @@ def main() -> int:
             continue
         syms = issue_symbols(inst.problem_statement)
         amb = idx.ambiguity(syms)
-        # 仅解释用：gold 在依赖图中的位置
+        # explanatory only: position of gold in the dependency graph
         gold_in = gold_out = 0
         gold_found = 0
         for g in inst.gold:
@@ -138,22 +146,22 @@ def main() -> int:
             "instance_id": r["instance_id"], "project": r.get("project"),
             "Y": r.get("Y"), "n_gold": r.get("n_gold"),
             "n_issue_syms": len(syms),
-            # --- 可预测用（不含 gold）---
+            # --- predictive (no gold) ---
             "n_defsites": amb["n_defsites"],
             "max_fanout": amb["max_fanout"],
             "n_files_hit": amb["n_files_hit"],
             "spread": amb["spread"],
             "repo_files": idx.n_files,
             "hit_ratio": round(amb["n_files_hit"] / max(1, idx.n_files), 5),
-            # --- 仅解释用（含 gold，禁止进模型）---
+            # --- explanatory only (contains gold, must not enter the model) ---
             "gold_indeg": gold_in, "gold_outdeg": gold_out,
             "gold_indexed": gold_found,
         })
         if i % 10 == 0:
-            print(f"  已处理 {i}/{len(target)}", flush=True)
+            print(f"  processed {i}/{len(target)}", flush=True)
 
-    A = [x for x in rows if x["Y"] == 0]     # 失败
-    B = [x for x in rows if x["Y"] == 1]     # 成功
+    A = [x for x in rows if x["Y"] == 0]     # failure
+    B = [x for x in rows if x["Y"] == 1]     # success
     tests = {}
     for f in ("n_defsites", "max_fanout", "n_files_hit", "spread", "hit_ratio",
               "repo_files", "gold_indeg", "gold_outdeg"):
@@ -167,13 +175,13 @@ def main() -> int:
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    print(f"\n=== AST 特征判别性（失败 {len(A)} vs 成功 {len(B)}）===")
-    print(f"{'特征':<16}{'失败中位':>10}{'成功中位':>10}{'z':>8}{'p':>9}{'r':>8}  类别")
+    print(f"\n=== AST feature discriminativeness (fail {len(A)} vs success {len(B)}) ===")
+    print(f"{'feature':<16}{'fail med':>10}{'succ med':>10}{'z':>8}{'p':>9}{'r':>8}  category")
     for f, t in tests.items():
         if "note" in t:
             print(f"  {f:<14} {t['note']}")
             continue
-        cat = "可预测" if f in res["predictive_features"] else "仅解释"
+        cat = "predictive" if f in res["predictive_features"] else "explanatory only"
         star = " *" if t["p_two_sided"] < 0.05 else ""
         print(f"{f:<16}{t['median_a']:>10}{t['median_b']:>10}"
               f"{t['z']:>8}{t['p_two_sided']:>9}{t['rank_biserial_r']:>8}  {cat}{star}")

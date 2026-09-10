@@ -1,32 +1,34 @@
-"""X4b：U^exec 是否有**非机械**结构 —— 决定 X4 的零结果能否发表。零 API。
+"""X4b: does U^exec have **non-mechanical** structure -- decides whether X4's null result is publishable. Zero API.
 
-问题
-----
-X4 得到「结构熵不预测执行不确定性」（rho=−0.088，CI 含 0），并用两个探针声称功效已确立：
-    |Δ| ~ U^exec  rho=+0.534 显著
-    v_t ~ U^exec  rho=−0.432 显著
-但这两个探针都与 U^exec **机械相关**，不能作为功效证据：
-  · v_t ~ U^exec：方差在均值靠近 0/1 时必然小（均值–方差约束），是算术不是结构。
-  · |Δ| ~ U^exec：|Δ|=|v_t−v_{t−1}| 由两个 8 次重放均值之差得到，
-    方差大 ⇒ Δ 的估计噪声大 ⇒ |Δ| 因噪声而偏大，同样是机械的。
+Question
+--------
+X4 concluded "structural entropy does not predict execution uncertainty" (rho=-0.088, CI contains 0),
+and claimed power was established with two probes:
+    |Δ| ~ U^exec  rho=+0.534 significant
+    v_t ~ U^exec  rho=-0.432 significant
+But both probes are **mechanically related** to U^exec and cannot serve as evidence of power:
+  · v_t ~ U^exec: variance is necessarily small when the mean approaches 0/1 (the mean-variance
+    constraint) -- arithmetic, not structure.
+  · |Δ| ~ U^exec: |Δ|=|v_t-v_{t-1}| is derived from the difference of two 8-replay means, so
+    large variance ⇒ noisy Δ estimate ⇒ |Δ| inflated by noise; equally mechanical.
 
-又：U^exec 的**中位数为 0、50.5% 的点方差恰好为零**（m=8 的 recall 只取少数离散值），
-这本身就说明该量在 m=8 下很粗。
+Also: U^exec has **median 0, with variance exactly zero at 50.5% of the points** (recall at m=8 takes
+only a few discrete values), which by itself shows the quantity is very coarse at m=8.
 
-所以必须换**与重放噪声无机械联系**的探针：
-  V1 instance 级 ICC   U^exec 是否有实例层结构（置换零假设打散实例分组）
-  V2 步位            U^exec ~ 归一化步位（Spearman）
-  V3 工具类型        U^exec 按当前步工具分组是否有差异（置换 tool 标签）
-  V4 残差化          先用 v_t 分箱吸收机械的均值–方差关系，再看**残差** U^exec
-                     是否仍与 H_tool / 步位 / 工具有关
+So we must switch to probes **with no mechanical link to replay noise**:
+  V1 instance-level ICC  does U^exec have instance-layer structure (null hypothesis scrambles instance grouping)
+  V2 step position       U^exec ~ normalized step position (Spearman)
+  V3 tool type           does U^exec differ when grouped by the current step's tool (permute tool labels)
+  V4 residualization     first bin by v_t to absorb the mechanical mean-variance relation, then check
+                         whether the **residual** U^exec is still related to H_tool / step position / tool
 
-判据（预注册）
---------------
-| V1–V3 结果 | 走向 |
+Criteria (pre-registered)
+-------------------------
+| V1-V3 result | Path forward |
 |---|---|
-| 至少一项显著 | U^exec 有真结构 ⇒ X4 的零结果是**实质结论**（结构熵与执行不确定性解耦），可发表 |
-| 全部不显著 | U^exec 在 m=8 下无可检出结构 ⇒ X4 的零结果**仅反映功效不足**，不可发表；
-             需提高 m 或换 U^exec 的定义（如用连续 recall 的 bootstrap 方差） |
+| at least one significant | U^exec has real structure ⇒ X4's null result is a **substantive conclusion** (structural entropy decoupled from execution uncertainty), publishable |
+| none significant | U^exec has no detectable structure at m=8 ⇒ X4's null result **only reflects insufficient power**, not publishable;
+             need larger m or a different definition of U^exec (e.g. bootstrap variance of continuous recall) |
 """
 
 from __future__ import annotations
@@ -57,7 +59,7 @@ def var(xs: list[float]) -> float:
 
 
 def icc(groups: dict[str, list[float]]) -> float:
-    """组间方差占总方差的比例（简化 ICC）。"""
+    """Share of total variance that is between-group (simplified ICC)."""
     allv = [x for v in groups.values() for x in v]
     if len(allv) < 3:
         return float("nan")
@@ -75,7 +77,7 @@ def main() -> int:
     ap.add_argument("--out", default="pilot/runs/x4b_uexec_validity.json")
     args = ap.parse_args()
 
-    # ---- 全局工具转移模型（用于 H_tool 协变量）----
+    # ---- global tool transition model (used for the H_tool covariate) ----
     trans: dict[str, Counter] = defaultdict(Counter)
     step_tool: dict[str, list[str]] = {}
     for p in sorted(Path(args.runs_root).glob("shard*/rollouts/*.jsonl")):
@@ -96,7 +98,7 @@ def main() -> int:
         ps = [(row.get(v, 0) + alpha) / tot for v in vocab]
         return -sum(q * math.log(q) for q in ps if q > 0)
 
-    # ---- 逐估值点 ----
+    # ---- per estimation point ----
     recs = [json.loads(l) for l in open(args.v4prime) if l.strip()]
     rows = []
     for r in recs:
@@ -118,10 +120,10 @@ def main() -> int:
                 "h_tool": (h_tool(cur) if cur else None),
                 "n_gold": r.get("n_gold"),
             })
-    print(f"逐点样本 {len(rows)}（来自 {len(recs)} 个 instance）")
+    print(f"per-point samples {len(rows)} (from {len(recs)} instances)")
     u = [x["u_exec"] for x in rows]
     print(f"U^exec: mean={statistics.mean(u):.6f} median={statistics.median(u):.6f} "
-          f"非零率={sum(1 for x in u if x > 1e-12)/len(u):.4f}")
+          f"nonzero rate={sum(1 for x in u if x > 1e-12)/len(u):.4f}")
 
     rng = random.Random(SEED)
     res: dict = {"n_points": len(rows), "n_instances": len(recs),
@@ -130,7 +132,7 @@ def main() -> int:
                             "nonzero_rate": round(
                                 sum(1 for x in u if x > 1e-12) / len(u), 4)}}
 
-    # ---- V1 instance 级 ICC ----
+    # ---- V1 instance-level ICC ----
     by_inst: dict[str, list[float]] = defaultdict(list)
     for x in rows:
         by_inst[x["iid"]].append(x["u_exec"])
@@ -155,10 +157,10 @@ def main() -> int:
         "n_instances": len(by_inst),
     }
 
-    # ---- V2 步位 ----
+    # ---- V2 step position ----
     res["V2_position"] = _spearman_boot([x["pos"] for x in rows], u)
 
-    # ---- V3 工具类型（置换 tool 标签，统计量=组间方差比）----
+    # ---- V3 tool type (permute tool labels, statistic = between-group variance ratio) ----
     tr = [x for x in rows if x["tool"]]
     by_tool: dict[str, list[float]] = defaultdict(list)
     for x in tr:
@@ -186,7 +188,7 @@ def main() -> int:
         "group_n": {k: len(v) for k, v in sorted(by_tool.items())},
     }
 
-    # ---- V4 残差化：先用 v_t 分箱吸收均值–方差的机械关系 ----
+    # ---- V4 residualization: bin by v_t first to absorb the mechanical mean-variance relation ----
     NB = 5
     srt = sorted(rows, key=lambda x: x["v_t"])
     bin_of: dict[int, list[float]] = defaultdict(list)
@@ -196,10 +198,11 @@ def main() -> int:
     bmean = {b: statistics.mean(v) for b, v in bin_of.items()}
     for x in rows:
         x["resid"] = x["u_exec"] - bmean[x["_bin"]]
-    # **决定性检验**：残差化后的 instance 级 ICC。
-    # V1 的原始 ICC 可能仍是机械的 —— v_t 强烈依赖 instance（有些实例恒 v≈1 ⇒
-    # 方差必为 0），故组间结构可能只是 v_t 的组间差异。只有在吸收 v_t 之后
-    # ICC 仍显著，才能说 U^exec 有真正的、非机械的实例层结构。
+    # **Decisive test**: instance-level ICC after residualization.
+    # V1's raw ICC may still be mechanical -- v_t depends strongly on the instance (some
+    # instances sit at v≈1 always ⇒ variance must be 0), so between-group structure may be
+    # nothing but between-group differences in v_t. Only if the ICC remains significant
+    # after absorbing v_t can we say U^exec has genuine, non-mechanical instance-layer structure.
     by_inst_r: dict[str, list[float]] = defaultdict(list)
     for x in rows:
         by_inst_r[x["iid"]].append(x["resid"])
@@ -220,11 +223,11 @@ def main() -> int:
 
     hr = [(x["h_tool"], x["resid"]) for x in rows if x["h_tool"] is not None]
     res["V4_residualized"] = {
-        "note": "v_t 五分箱吸收机械的均值–方差关系后，残差 U^exec 的关系",
+        "note": "relations of the residual U^exec after five v_t bins absorb the mechanical mean-variance relation",
         "bin_means_of_u_exec_by_v_t": {str(k): round(v, 5)
                                        for k, v in sorted(bmean.items())},
         "resid_vs_h_tool": (_spearman_boot([a for a, _ in hr], [b for _, b in hr])
-                            if len(hr) > 20 else {"note": "样本不足"}),
+                            if len(hr) > 20 else {"note": "insufficient samples"}),
         "resid_vs_position": _spearman_boot([x["pos"] for x in rows],
                                             [x["resid"] for x in rows]),
         "RESIDUALIZED_instance_ICC": {
@@ -232,7 +235,7 @@ def main() -> int:
             "null_mean": round(statistics.mean(rn), 4),
             "null_p975": round(rn[int(0.975 * len(rn))], 4),
             "perm_p": p_ricc, "significant": bool(p_ricc < 0.05),
-            "note": "吸收 v_t 后仍显著 ⇒ U^exec 有非机械的实例层结构",
+            "note": "still significant after absorbing v_t ⇒ U^exec has non-mechanical instance-layer structure",
         },
     }
 
@@ -242,44 +245,44 @@ def main() -> int:
     res["VERDICT"] = {
         "non_mechanical_probes_significant": sig,
         "decision": (
-            f"U^exec 有非机械结构（{', '.join(sig)} 显著）⇒ X4 的零结果是**实质结论**，可发表"
+            f"U^exec has non-mechanical structure ({', '.join(sig)} significant) ⇒ X4's null result is a **substantive conclusion**, publishable"
             if sig else
-            "U^exec 在 m=8 下无可检出的非机械结构 ⇒ X4 的零结果**仅反映功效不足**，"
-            "不可作为『结构与执行不确定性解耦』的证据；需提高 m 或改 U^exec 定义"),
+            "U^exec has no detectable non-mechanical structure at m=8 ⇒ X4's null result **only reflects insufficient power**, "
+            "and cannot serve as evidence for \"structure decoupled from execution uncertainty\"; need larger m or a revised U^exec definition"),
     }
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    print(f"\n=== V1 instance 级 ICC（U^exec 是否有实例层结构）===")
+    print(f"\n=== V1 instance-level ICC (does U^exec have instance-layer structure) ===")
     v = res["V1_instance_ICC"]
-    print(f"  观测 {v['observed']}  零假设均值 {v['null_mean']}  "
-          f"零假设 97.5% {v['null_p975']}  perm p={v['perm_p']:.4g}  "
-          f"{'显著' if v['significant'] else '不显著'}  (n_inst={v['n_instances']})")
-    print(f"\n=== V2 U^exec ~ 归一化步位 ===")
+    print(f"  observed {v['observed']}  null mean {v['null_mean']}  "
+          f"null 97.5% {v['null_p975']}  perm p={v['perm_p']:.4g}  "
+          f"{'significant' if v['significant'] else 'not significant'}  (n_inst={v['n_instances']})")
+    print(f"\n=== V2 U^exec ~ normalized step position ===")
     v = res["V2_position"]
     print(f"  rho={v['rho']:+.4f} CI{v['ci95']}  n={v['n']}  "
-          f"{'显著' if v['significant'] else '不显著'}")
-    print(f"\n=== V3 U^exec 按当前步工具分组 ===")
+          f"{'significant' if v['significant'] else 'not significant'}")
+    print(f"\n=== V3 U^exec grouped by the current step's tool ===")
     v = res["V3_tool_type"]
-    print(f"  组间方差比 {v['observed_between_group_ratio']}  零假设 {v['null_mean']}  "
-          f"perm p={v['perm_p']:.4g}  {'显著' if v['significant'] else '不显著'}")
+    print(f"  between-group variance ratio {v['observed_between_group_ratio']}  null {v['null_mean']}  "
+          f"perm p={v['perm_p']:.4g}  {'significant' if v['significant'] else 'not significant'}")
     for k in v["group_means"]:
         print(f"    {k:<14} mean={v['group_means'][k]:<10} n={v['group_n'][k]}")
-    print(f"\n=== V4 残差化（吸收 v_t 的机械效应后）===")
+    print(f"\n=== V4 residualized (after absorbing the mechanical v_t effect) ===")
     v4 = res["V4_residualized"]
-    print(f"  U^exec 按 v_t 五分箱的均值: {v4['bin_means_of_u_exec_by_v_t']}")
+    print(f"  mean U^exec by v_t quintile: {v4['bin_means_of_u_exec_by_v_t']}")
     for key in ("resid_vs_h_tool", "resid_vs_position"):
         d = v4[key]
         if "note" in d:
             print(f"  {key:<20} {d['note']}")
             continue
         print(f"  {key:<20} rho={d['rho']:+.4f} CI{d['ci95']}  "
-              f"{'显著' if d['significant'] else '不显著'}")
+              f"{'significant' if d['significant'] else 'not significant'}")
     ri = res["V4_residualized"]["RESIDUALIZED_instance_ICC"]
-    print(f"  **残差化后的 instance ICC**: 观测 {ri['observed']}  "
-          f"零假设 {ri['null_mean']} (97.5%={ri['null_p975']})  "
-          f"perm p={ri['perm_p']:.4g}  {'显著' if ri['significant'] else '不显著'}")
-    print(f"\n=== 裁决 ===\n  {res['VERDICT']['decision']}")
+    print(f"  **residualized instance ICC**: observed {ri['observed']}  "
+          f"null {ri['null_mean']} (97.5%={ri['null_p975']})  "
+          f"perm p={ri['perm_p']:.4g}  {'significant' if ri['significant'] else 'not significant'}")
+    print(f"\n=== Verdict ===\n  {res['VERDICT']['decision']}")
     print(f"\n→ {args.out}")
     return 0
 

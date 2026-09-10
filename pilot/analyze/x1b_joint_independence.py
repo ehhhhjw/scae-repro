@@ -1,29 +1,33 @@
-"""X1b：补完 X1 —— 联合分布的**实测**评估与**条件独立假设的检验**。零 API。
+"""X1b: completing X1 -- the **measured** evaluation of the joint distribution and **a test of
+the conditional independence assumption**. Zero API.
 
-X1 缺了什么
------------
-X1 报「联合有效候选数 = exp(H_tool) × exp(H_prov) = 2.757 × 3.46 = 9.54」。
-但这个乘法依赖 **P(tool,obj) = P(tool)·P(obj)** 这个条件独立假设，
-而 X1 自己注明"独立性尚未检验"。若不独立，9.54 这个数是错的
-（不独立时联合熵 < 边际熵之和，故 9.54 是**上界**而非估计）。
+What X1 was missing
+-------------------
+X1 reported "joint effective candidates = exp(H_tool) × exp(H_prov) = 2.757 × 3.46 = 9.54".
+But that multiplication relies on the conditional independence assumption
+**P(tool,obj) = P(tool)·P(obj)**, while X1 itself noted "independence not yet tested".
+If they are not independent, the number 9.54 is wrong (under dependence the joint entropy <
+the sum of the marginal entropies, so 9.54 is an **upper bound**, not an estimate).
 
-方案 X1 要求的是联合分布的 **实测 top-k / ECE / exp(H)**，而非边际相乘。本脚本补齐：
+What plan X1 asked for is the **measured top-k / ECE / exp(H)** of the joint distribution, not
+a product of marginals. This script fills that in:
 
-  J1 实测联合：候选 = (tool, obj) 笛卡尔积，P = P(tool)·P(obj_prov)，
-     共同分母、闭式期望破并列，给 top-k / ECE / 有效候选
-  J2 独立性检验：I(tool_{t+1}; objcat_{t+1}) vs **episode 内置换零假设**
-     objcat 用粗分类 {在最近输出的路径里 / 在已访问集合里 / 其他}，
-     因为对象空间太大无法直接估互信息
-  J3 若不独立：拟合 tool 条件化的对象模型（每个工具类别一套溯源加权），
-     用 NLL 与联合 top-k 对比因子化模型，量化误配代价
-  J4 联合 ECE 分层：按 (工具类型 × 溯源覆盖 × 步位) 找"何时可信"
+  J1 measured joint: candidates = Cartesian product (tool, obj), P = P(tool)·P(obj_prov),
+     common denominator, closed-form expectation for ties, giving top-k / ECE / eff. candidates
+  J2 independence test: I(tool_{t+1}; objcat_{t+1}) vs **a within-episode permutation null**
+     objcat uses the coarse classes {in the most recent output's paths / in the visited set /
+     other}, because the object space is too large to estimate mutual information directly
+  J3 if not independent: fit a tool-conditioned object model (one provenance weighting per tool
+     class), compare it to the factored model by NLL and joint top-k, quantifying the
+     misspecification cost
+  J4 joint ECE stratification: find "when to trust" by (tool type × provenance coverage × step position)
 
-判据（预注册）
---------------
-| J2 结果 | 走向 |
+Criteria (pre-registered)
+-------------------------
+| J2 result | consequence |
 |---|---|
-| 互信息显著 > 零假设 | 因子化误配 → 9.54 只能作上界报告；改用 J1 实测值与 J3 条件模型 |
-| 不显著 | 独立假设可接受 → 9.54 可作估计，但仍以 J1 实测为准 |
+| MI significantly > null | factorization misspecified → 9.54 may only be reported as an upper bound; use the J1 measured values and the J3 conditional model |
+| not significant | independence acceptable → 9.54 usable as an estimate, but the J1 measured values still govern |
 """
 
 from __future__ import annotations
@@ -59,7 +63,7 @@ def objcat(truth: str, last_out: list[str], seen: set[str]) -> str:
 
 
 def mutual_info(pairs: list[tuple[str, str]]) -> float:
-    """I(X;Y) in nats。"""
+    """I(X;Y) in nats."""
     if not pairs:
         return 0.0
     n = len(pairs)
@@ -79,17 +83,17 @@ def main() -> int:
     for e in eps:
         by_repo[e["project"]].append(e)
     tool_vocab = sorted({s["tool"] for e in eps for s in e["seq"]})
-    print(f"载入 {len(eps)} episode，工具 {len(tool_vocab)} 类")
+    print(f"loaded {len(eps)} episodes, {len(tool_vocab)} tool classes")
 
-    # J1 实测联合
+    # J1 measured joint
     joint_hits = {k: [] for k in KS}
     joint_cov, joint_eff, joint_cal = [], [], []
-    # 因子化 vs 条件化的 NLL
+    # NLL of factored vs conditional
     nll_fact, nll_cond = [], []
-    factored_hits = {k: [] for k in KS}       # 仅对象分量（对照）
-    # J2 独立性
+    factored_hits = {k: [] for k in KS}       # object component only (control)
+    # J2 independence
     mi_pairs_per_ep: list[list[tuple[str, str]]] = []
-    # J4 分层
+    # J4 stratification
     strat: dict[str, list[tuple[float, int]]] = defaultdict(list)
     strat_top3: dict[str, list[float]] = defaultdict(list)
 
@@ -99,7 +103,7 @@ def main() -> int:
         for hi, held in enumerate(group):
             train = [x for j, x in enumerate(group) if j != hi]
             tm = fit_tool_trans(train)
-            # 条件化模型：每个"当前工具"类别一套溯源位置权重（从 train 估）
+            # conditional model: one set of provenance position weights per "current tool" class (estimated from train)
             cond_w: dict[str, Counter] = defaultdict(Counter)
             for x in train:
                 sq = x["seq"]
@@ -110,7 +114,7 @@ def main() -> int:
                         o_prev = mo
                     tr = sq[t2 + 1]["node"]
                     if tr and o_prev:
-                        # 真值在最近输出里的位置桶（0,1,2,3+）
+                        # position bucket of the truth inside the most recent output (0,1,2,3+)
                         if tr in o_prev:
                             b = min(3, o_prev.index(tr))
                             cond_w[sq[t2 + 1]["tool"]][b] += 1
@@ -131,16 +135,16 @@ def main() -> int:
                 nxt_tool = seq[t + 1]["tool"]
                 ep_pairs.append((nxt_tool, objcat(truth, last_out, seen)))
 
-                # 工具分量
+                # tool component
                 pt = {v: p_tool(tm, seq[t]["tool"], v, tool_vocab) for v in tool_vocab}
                 zt = sum(pt.values())
                 pt = {k: v / zt for k, v in pt.items()}
-                # 对象分量（prov_lastout_ranked：最近一条输出按位置加权）
+                # object component (prov_lastout_ranked: the most recent output weighted by position)
                 po_raw = {x: 1.0 / (i + 1) for i, x in enumerate(last_out)}
                 zo = sum(po_raw.values())
                 po = {k: v / zo for k, v in po_raw.items()} if zo else {}
 
-                # --- J1 联合 ---
+                # --- J1 joint ---
                 if po:
                     jd = {(a, b): pa * pb
                           for a, pa in pt.items() for b, pb in po.items()}
@@ -156,12 +160,12 @@ def main() -> int:
                                          if kk != (nxt_tool, truth)),
                                         reverse=True)[:20]:
                             joint_cal.append((v, 0))
-                    # 对象分量单独（对照）
+                    # object component alone (control)
                     rso = rank_ge(po, truth)
                     for k in KS:
                         factored_hits[k].append(
                             exp_hit(rso[0], rso[1], k) if rso else 0.0)
-                    # --- J3 NLL：因子化 vs 条件化 ---
+                    # --- J3 NLL: factored vs conditional ---
                     if truth in po:
                         nll_fact.append(-math.log(max(po[truth], 1e-12)))
                         row = cond_w.get(nxt_tool)
@@ -174,17 +178,19 @@ def main() -> int:
                             nll_cond.append(-math.log(max(pc.get(truth, 1e-12), 1e-12)))
                         else:
                             nll_cond.append(-math.log(max(po[truth], 1e-12)))
-                    # --- J4 分层 ---
+                    # --- J4 stratification ---
                     covered = truth in po
                     pos = "early" if t < len(seq) / 3 else (
                         "mid" if t < 2 * len(seq) / 3 else "late")
-                    # ⚠️ 分层 ECE 必须同时收正例与负例，否则算出的只是
-                    # 1−mean(p_true)，不是校准误差（本脚本首版就犯了这个错）。
+                    # ⚠️ Stratified ECE must collect positives and negatives together, otherwise
+                    # what it computes is just 1−mean(p_true), not calibration error (the first
+                    # version of this script made exactly this mistake).
                     negs = sorted((v for kk, v in jd.items()
                                    if kk != (nxt_tool, truth)), reverse=True)[:20]
-                    # ⚠️ prov_cov 条件在**真值**上（truth in po），预测时不可知，
-                    # 故它只是「给定覆盖的条件精度」，**不能当可操作规则**。
-                    # 下面三个键才是预测时可观测的，可用于真正的"何时可信"规则。
+                    # ⚠️ prov_cov conditions on the **truth** (truth in po), which is unknown at
+                    # prediction time, so it is only "conditional precision given coverage" and
+                    # **cannot be used as an actionable rule**. Only the three keys below are
+                    # observable at prediction time and can form a real "when to trust" rule.
                     nlast = len(last_out)
                     nb = ("nlast=0" if nlast == 0 else "nlast=1-3" if nlast <= 3
                           else "nlast=4-10" if nlast <= 10 else "nlast=11+")
@@ -203,7 +209,7 @@ def main() -> int:
             if ep_pairs:
                 mi_pairs_per_ep.append(ep_pairs)
 
-    # ---- J2 独立性：episode 内置换 tool 标签 ----
+    # ---- J2 independence: permute tool labels within each episode ----
     rng = random.Random(SEED)
     obs_mi, null_mi, per_ep_p = [], [], []
     for pairs in mi_pairs_per_ep:
@@ -219,7 +225,7 @@ def main() -> int:
         obs_mi.append(o)
         null_mi.append(statistics.mean(nulls))
         per_ep_p.append((sum(1 for v in nulls if v >= o) + 1) / (len(nulls) + 1))
-    # 全局池化互信息（更有功效）
+    # globally pooled mutual information (more power)
     allp = [p for ps in mi_pairs_per_ep for p in ps]
     g_obs = mutual_info(allp)
     tools_all = [a for a, _ in allp]
@@ -244,7 +250,7 @@ def main() -> int:
                 f"top{k}": round(statistics.mean(factored_hits[k]), 4) for k in KS},
         },
         "J2_independence_test": {
-            "note": "objcat={in_last_output,in_visited,other}；零假设=episode 内置换 tool 标签",
+            "note": "objcat={in_last_output,in_visited,other}; null = permute tool labels within episode",
             "pooled_MI_observed_nats": round(g_obs, 5),
             "pooled_MI_null_mean": round(statistics.mean(g_nulls), 5),
             "pooled_MI_null_p975": round(g_nulls[int(0.975 * len(g_nulls))], 5),
@@ -260,7 +266,7 @@ def main() -> int:
             "nll_factored": boot_ci(nll_fact),
             "nll_tool_conditional": boot_ci(nll_cond),
             "diff_factored_minus_conditional": paired_ci(nll_fact, nll_cond),
-            "note": "差值 >0 且显著 ⇒ 条件化更好 ⇒ 因子化误配",
+            "note": "diff >0 and significant ⇒ conditional is better ⇒ factorization misspecified",
         },
         "J4_stratified_top3_and_ECE": {
             k: {"top3": boot_ci(v)["mean"], "n": len(v),
@@ -268,55 +274,55 @@ def main() -> int:
                 "n_calib_pairs": len(strat.get(k, []))}
             for k, v in sorted(strat_top3.items())},
         "independence_upper_bound_note": (
-            "X1 的 exp(H_tool)×exp(H_prov)=9.54 在不独立时是**上界**："
-            "互信息 I>0 ⇒ 联合熵 = H_tool+H_prov−I < 边际之和"),
+            "X1's exp(H_tool)×exp(H_prov)=9.54 is an **upper bound** under dependence: "
+            "mutual information I>0 ⇒ joint entropy = H_tool+H_prov−I < sum of the marginals"),
     }
     mi_excess = g_obs - statistics.mean(g_nulls)
     res["J2_independence_test"]["verdict"] = (
-        f"独立假设**不成立**（池化互信息超出零假设 {mi_excess:.5f} nat，"
-        f"perm p={g_p:.4g}）⇒ 9.54 只能作上界"
+        f"independence **does not hold** (pooled mutual information exceeds the null by {mi_excess:.5f} nat, "
+        f"perm p={g_p:.4g}) ⇒ 9.54 may only be used as an upper bound"
         if g_p < 0.05 else
-        f"独立假设可接受（perm p={g_p:.4g}）⇒ 9.54 可作估计，仍以 J1 实测为准")
+        f"independence acceptable (perm p={g_p:.4g}) ⇒ 9.54 usable as an estimate, but the J1 measured values still govern")
 
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
     j1 = res["J1_measured_joint"]
-    print(f"\n=== J1 实测联合分布（n={n_pts}，共同分母）===")
-    print(f"  覆盖 {j1['coverage']['mean']:.4f} CI{j1['coverage']['ci95']}")
+    print(f"\n=== J1 measured joint distribution (n={n_pts}, common denominator) ===")
+    print(f"  coverage {j1['coverage']['mean']:.4f} CI{j1['coverage']['ci95']}")
     for k in KS:
         b = j1["topk_uncond"][f"top{k}"]
-        print(f"  联合 top-{k:<2} {b['mean']:.4f} CI{b['ci95']}")
-    print(f"  联合有效候选（实测中位）**{j1['eff_candidates_median']}**"
+        print(f"  joint top-{k:<2} {b['mean']:.4f} CI{b['ci95']}")
+    print(f"  joint effective candidates (measured median) **{j1['eff_candidates_median']}**"
           f"   ECE {j1['ECE_cond']}")
-    print(f"  对象分量单独 top-k: " +
+    print(f"  object component alone top-k: " +
           "  ".join(f"{k}={v}" for k, v in j1["object_component_only_topk"].items()))
 
     j2 = res["J2_independence_test"]
-    print(f"\n=== J2 条件独立性检验 ===")
-    print(f"  池化互信息 观测 {j2['pooled_MI_observed_nats']} nat   "
-          f"零假设均值 {j2['pooled_MI_null_mean']}   "
-          f"零假设 97.5% 分位 {j2['pooled_MI_null_p975']}")
-    print(f"  置换 p = {j2['pooled_perm_p']:.4g}   "
-          f"单 episode 显著率 {j2['per_episode_frac_p_below_05']}")
-    print(f"  裁决：{j2['verdict']}")
+    print(f"\n=== J2 conditional independence test ===")
+    print(f"  pooled mutual information: observed {j2['pooled_MI_observed_nats']} nat   "
+          f"null mean {j2['pooled_MI_null_mean']}   "
+          f"null 97.5% quantile {j2['pooled_MI_null_p975']}")
+    print(f"  permutation p = {j2['pooled_perm_p']:.4g}   "
+          f"per-episode significant rate {j2['per_episode_frac_p_below_05']}")
+    print(f"  verdict: {j2['verdict']}")
 
     j3 = res["J3_factored_vs_conditional_NLL"]
     if "note" not in j3["nll_factored"]:
         d = j3["diff_factored_minus_conditional"]
-        print(f"\n=== J3 因子化 vs 工具条件化（NLL，越小越好）===")
-        print(f"  因子化 {j3['nll_factored']['mean']:.4f}   "
-              f"工具条件化 {j3['nll_tool_conditional']['mean']:.4f}")
+        print(f"\n=== J3 factored vs tool-conditional (NLL, lower is better) ===")
+        print(f"  factored {j3['nll_factored']['mean']:.4f}   "
+              f"tool-conditional {j3['nll_tool_conditional']['mean']:.4f}")
         if "note" not in d:
-            print(f"  差值(因子化−条件化) {d['diff']:+.4f} "
+            print(f"  diff(factored−conditional) {d['diff']:+.4f} "
                   f"CI[{d['ci95'][0]:+.4f}, {d['ci95'][1]:+.4f}]  "
-                  f"{'显著（条件化更好）' if d['significant'] and d['diff'] > 0 else '不显著' if not d['significant'] else '显著（因子化更好）'}")
+                  f"{'significant (conditional better)' if d['significant'] and d['diff'] > 0 else 'not significant' if not d['significant'] else 'significant (factored better)'}")
 
-    print(f"\n=== J4 分层 top-3 / ECE（找'何时可信'）===")
-    print(f"  注：tool=X 指**当前步**的工具（做完 X 之后下一步好不好预测）；")
-    print(f"      OBS_* 为预测时**可观测**的分层，可作可操作规则；")
-    print(f"      POSTHOC_* 条件在真值上，**不可作规则**，仅为条件精度参考。")
-    print(f"{'分层':<26}{'n':>7}{'top3':>9}{'ECE':>9}{'校准对':>8}")
+    print(f"\n=== J4 stratified top-3 / ECE (finding 'when to trust') ===")
+    print(f"  Note: tool=X refers to the tool of the **current step** (how predictable the next step is after doing X);")
+    print(f"      OBS_* are strata **observable** at prediction time and can serve as actionable rules;")
+    print(f"      POSTHOC_* condition on the truth, **cannot serve as rules**, only as conditional-precision reference.")
+    print(f"{'stratum':<26}{'n':>7}{'top3':>9}{'ECE':>9}{'calib':>8}")
     for k, v in res["J4_stratified_top3_and_ECE"].items():
         print(f"{k:<26}{v['n']:>7}{v['top3']:>9.4f}{v['ECE']:>9.4f}"
               f"{v['n_calib_pairs']:>8}")

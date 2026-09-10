@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-"""V5 独立探针：同前缀重复 fork 的动作熵。
+"""V5 standalone probe: action entropy of repeated forks from the same prefix.
 
-这是整个方法的单点故障。给定一条已有 rollout，截到第 k 步之前，
-反复 fork + 续跑，只采样"续跑产生的第一个动作 A_k"，统计其分布的熵。
+This is the single point of failure of the whole method. Given an existing rollout, truncate it
+before step k, then repeatedly fork + continue, sampling only "the first action A_k produced by
+the continuation", and measure the entropy of its distribution.
 
-判据
-----
-  H > 0（≥2 个不同动作）→ 策略在该前缀上有随机性 → fork-resample 能估计 v_t
-                          → C2 归因 / C4 预测的估计路径成立
-  H ≈ 0（只有 1 个动作） → positivity 失效 → Δ_t 的策略基线项恒为 0
-                          → 必须改用软干预(turn/steer)，估计量重写为"相对扰动策略的效应"
+Criterion
+---------
+  H > 0 (≥2 distinct actions) → the policy is stochastic on that prefix → fork-resample can estimate v_t
+                              → the estimation path for C2 attribution / C4 prediction holds
+  H ≈ 0 (only 1 action)       → positivity fails → the policy baseline term of Δ_t is identically 0
+                              → must switch to soft intervention (turn/steer), estimand rewritten as "effect relative to a perturbed policy"
 
-为什么单独做
-------------
-smoke.py 的 V5 依赖先跑完整任务。这里直接吃已有 rollout，可对多个 (仓库, k)
-快速扫描，且能复用同一个 AppServer 子进程降低握手开销。
+Why do it separately
+--------------------
+smoke.py's V5 requires running the full task first. This one eats an existing rollout directly, can
+scan many (repository, k) pairs quickly, and reuses one AppServer subprocess to cut handshake cost.
 
-用法
-----
+Usage
+-----
     python -m pilot.smoke.probe_v5 \\
         --rollout pilot/runs/smoke/astropy__astropy-12907/base.rollout.jsonl \\
         --instance astropy__astropy-12907 \\
@@ -53,7 +54,7 @@ def norm_entropy(counts: Counter) -> float:
 
 
 def first_action_after(items_after: list[dict], k: int, repo: Path) -> str | None:
-    """续跑轨迹里第 k 步的动作桶（前 k-1 步是被固定的前缀）。"""
+    """Action bucket of step k in the continuation trace (steps 1..k-1 are the pinned prefix)."""
     st = R.steps(items_after)
     if len(st) < k:
         return None
@@ -80,7 +81,7 @@ def probe_one_step(
     actions: list[str] = []
     errors: list[str] = []
     for i in range(samples):
-        T.reset_repo(inst)                       # 每次续跑前回干净态
+        T.reset_repo(inst)                       # back to a clean state before each continuation
         try:
             fk = srv.thread_fork(
                 path=fork_file, cwd=inst.repo, model=model, model_provider=provider,
@@ -105,7 +106,7 @@ def probe_one_step(
             if fa:
                 actions.append(fa)
             else:
-                errors.append(f"s{i}: 未采到第{k}步动作")
+                errors.append(f"s{i}: did not sample the step-{k} action")
         except Exception as exc:  # noqa: BLE001
             errors.append(f"s{i}: {type(exc).__name__}: {str(exc)[:150]}")
 
@@ -172,14 +173,14 @@ def main() -> int:
     report["verdict"] = {
         "any_step_has_positivity": any_ok,
         "conclusion": (
-            "至少一个 fork 点有动作随机性 → fork-resample 可估计 v_t，主线成立"
+            "at least one fork point has action stochasticity → fork-resample can estimate v_t, main line holds"
             if any_ok else
-            "所有 fork 点动作熵均为 0 → positivity 失效 → 改软干预路线，估计量需重写"
+            "action entropy is 0 at every fork point → positivity fails → switch to the soft-intervention route, estimand must be rewritten"
         ),
     }
     (outdir / "v5_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"\n裁决: {report['verdict']['conclusion']}")
+    print(f"\nVerdict: {report['verdict']['conclusion']}")
     return 0
 
 

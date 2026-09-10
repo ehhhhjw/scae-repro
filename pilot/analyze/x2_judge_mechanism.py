@@ -1,29 +1,29 @@
-"""X2：LLM judge 的选择能否被一条**零 LLM 的结构规则**复现。零 API。
+"""X2: can the LLM judge's choice be reproduced by a single **zero-LLM structural rule**. Zero API.
 
-动机
-----
-V3k 发现 judge top-1 有 90.0% 落在"与 gold 有溯源关系"的步上（因果 top-1 仅 28.6%）。
-若一条平凡结构规则就能复现 judge 的选择，则**观测型过程归因未超出结构信息**，
-这是对该类方法的强否证，且零成本。
+Motivation
+----------
+V3k found that 90.0% of judge top-1 picks land on steps "with a provenance relation to gold" (causal top-1: only 28.6%).
+If a trivial structural rule can reproduce the judge's choice, then **observational process attribution carries no
+information beyond structure** -- a strong disproof of that class of methods, at zero cost.
 
-必须先修的选择空间不匹配
-------------------------
-V3k 对 judge 与因果 top-1 用了**同一个**基线（估值点中 gold 溯源步的占比 36.2%）。
-但 judge 读整条 trace，从**全部步**里选；因果 top-1 只在 ~5 个**等距估值点**里选。
-两者选择空间不同，基线必须各算：
+Selection-space mismatch that must be fixed first
+-------------------------------------------------
+V3k used **the same** baseline for the judge and for causal top-1 (36.2%, the share of gold provenance steps among
+estimation points). But the judge reads the whole trace and picks from **all steps**; causal top-1 only picks among
+~5 **equally spaced estimation points**. The two selection spaces differ, so the baselines must be computed separately:
 
-    judge 的基线 = gold 溯源步 / 全部步
-    因果的基线   = gold 溯源步 / 估值点
+    judge baseline  = gold provenance steps / all steps
+    causal baseline = gold provenance steps / estimation points
 
-本脚本并列上报两个空间，并给出**限制到共同空间**的公平对比。
+This script reports both spaces side by side, plus a fair comparison **restricted to the common space**.
 
-候选规则（全部零 LLM）
-----------------------
-  R1 first_gold      首次让 gold 进入观测史的步
-  R2 visit_gold      首个直接操作 gold 文件的步
-  R3 last_gold       最后一个与 gold 有溯源关系的步（因 judge 已知偏后 A12）
-  R4 last_step       最后一步（纯位置基线：检验"偏后"本身能否解释 judge）
-  R5 max_gold        提到 gold 最多的步
+Candidate rules (all zero-LLM)
+------------------------------
+  R1 first_gold      first step that brings gold into the observation history
+  R2 visit_gold      first step that directly operates on a gold file
+  R3 last_gold       last step with a provenance relation to gold (the judge is known to skew late, A12)
+  R4 last_step       final step (pure positional baseline: does "skewing late" alone explain the judge?)
+  R5 max_gold        step mentioning gold the most
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ RULES = ("R1_first_gold", "R2_visit_gold", "R3_last_gold",
 
 
 def rule_pick(rel: dict[int, dict], all_steps: list[int]) -> dict[str, int | None]:
-    """各规则的 top-1 选择（步号）。"""
+    """Top-1 pick of each rule (step index)."""
     gold_steps = [t for t in all_steps if rel[t]["any_gold"]]
     firsts = [t for t in all_steps if rel[t]["first_gold"]]
     visits = [t for t in all_steps if rel[t]["visit_gold"]]
@@ -77,22 +77,22 @@ def main() -> int:
         for line in f.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 recs.append(json.loads(line))
-    print(f"载入 {len(recs)} 条归因记录")
+    print(f"loaded {len(recs)} attribution records")
 
-    # 选择空间诊断
+    # Selection-space diagnostics
     judge_in_estpts = []
     share_allsteps, share_estpts = [], []
     judge_hit_all, judge_hit_est = [], []
     causal_hit_est = []
-    # 规则一致率
+    # Rule agreement rate
     agree = {r: [] for r in RULES}
     agree_chance = {r: [] for r in RULES}
-    # 公平对比（限制到 judge 落在估值点内的 instance）
+    # Fair comparison (restricted to instances whose judge pick is inside the estimation points)
     fair_judge, fair_causal = [], []
     n_used = 0
     judge_pos, causal_pos = [], []
     residual_when_rule_misses: Counter = Counter()
-    # 类内位置：judge 在 gold 溯源步**之中**的相对位置（1=最靠后），闭式零假设 0.5
+    # Within-class position: judge's relative position **among** gold provenance steps (1=latest), closed-form null 0.5
     within_gold_pos, within_gold_null = [], []
     n_gold_steps = []
 
@@ -131,16 +131,16 @@ def main() -> int:
             fair_judge.append(1.0 if rel[jt]["any_gold"] else 0.0)
             fair_causal.append(1.0 if rel[ct]["any_gold"] else 0.0)
 
-        # 类内位置：给定 judge 挑了 gold 溯源步，它在这些步里排第几（从后数）
+        # Within-class position: given the judge picked a gold provenance step, its rank among those steps (from the end)
         gsteps = [t for t in all_steps if rel[t]["any_gold"]]
         n_gold_steps.append(len(gsteps))
         if jt in rel and rel.get(jt, {}).get("any_gold") and len(gsteps) >= 2:
-            # 归一化"靠后程度"：1.0=最后一个 gold 步，0.0=第一个
+            # Normalized "lateness": 1.0=last gold step, 0.0=first
             r_idx = gsteps.index(jt)
             within_gold_pos.append(r_idx / (len(gsteps) - 1))
-            within_gold_null.append(0.5)          # 均匀期望，闭式
+            within_gold_null.append(0.5)          # uniform expectation, closed form
 
-        # 规则 vs judge 的一致率；chance = 1/n_steps（随机规则命中同一步）
+        # Rule vs judge agreement; chance = 1/n_steps (a random rule hitting the same step)
         picks = rule_pick(rel, all_steps)
         for r in RULES:
             p = picks[r]
@@ -148,7 +148,7 @@ def main() -> int:
                 continue
             agree[r].append(1.0 if p == jt else 0.0)
             agree_chance[r].append(1.0 / len(all_steps))
-        # 残差：R3 没命中时 judge 选了什么样的步
+        # Residual: what kind of step the judge picks when R3 misses
         if jt in rel and picks["R3_last_gold"] is not None and picks["R3_last_gold"] != jt:
             residual_when_rule_misses[
                 "gold" if rel[jt]["any_gold"] else "non_gold"] += 1
@@ -156,7 +156,8 @@ def main() -> int:
     res = {
         "n_instances": n_used,
         "SELECTION_SPACE": {
-            "note": "judge 从全部步选，因果 top-1 只从等距估值点选 → 基线必须各算",
+            "note": "the judge picks from all steps, causal top-1 only from equally spaced estimation points "
+                    "→ baselines must be computed separately",
             "judge_pick_inside_estimation_points": boot_ci(judge_in_estpts),
             "gold_provenance_share_of_all_steps": boot_ci(share_allsteps),
             "gold_provenance_share_of_estimation_points": boot_ci(share_estpts),
@@ -172,7 +173,7 @@ def main() -> int:
             "diff": paired_ci(causal_hit_est, share_estpts[:len(causal_hit_est)]),
         },
         "fair_comparison_same_space": {
-            "note": "仅取 judge 的选择恰落在估值点内的 instance",
+            "note": "only instances whose judge pick falls exactly on an estimation point",
             "n": len(fair_judge),
             "judge": boot_ci(fair_judge), "causal": boot_ci(fair_causal),
             "diff": paired_ci(fair_judge, fair_causal),
@@ -186,8 +187,8 @@ def main() -> int:
             for r in RULES},
         "residual_when_R3_misses": dict(residual_when_rule_misses),
         "WITHIN_CLASS_position": {
-            "note": "给定 judge 挑了 gold 溯源步，它在这些步中的归一化靠后程度"
-                    "（1=最后一个 gold 步）；闭式零假设 0.5",
+            "note": "given the judge picked a gold provenance step, its normalized lateness among those steps "
+                    "(1=last gold step); closed-form null 0.5",
             "observed": boot_ci(within_gold_pos),
             "uniform_null": 0.5,
             "diff": paired_ci(within_gold_pos, within_gold_null),
@@ -201,18 +202,18 @@ def main() -> int:
                               encoding="utf-8")
 
     ss = res["SELECTION_SPACE"]
-    print(f"\n可用 {n_used} instance")
-    print(f"\n=== 选择空间诊断（V3k 基线错配的修正）===")
-    print(f"  judge 的选择落在估值点内的比例 "
+    print(f"\nusable instances: {n_used}")
+    print(f"\n=== Selection-space diagnostics (fixing V3k's baseline mismatch) ===")
+    print(f"  fraction of judge picks landing inside estimation points "
           f"{ss['judge_pick_inside_estimation_points']['mean']:.4f} "
           f"CI{ss['judge_pick_inside_estimation_points']['ci95']}")
-    print(f"  gold 溯源步占**全部步** {ss['gold_provenance_share_of_all_steps']['mean']:.4f} "
+    print(f"  gold provenance steps as share of **all steps** {ss['gold_provenance_share_of_all_steps']['mean']:.4f} "
           f"CI{ss['gold_provenance_share_of_all_steps']['ci95']}")
-    print(f"  gold 溯源步占**估值点** {ss['gold_provenance_share_of_estimation_points']['mean']:.4f} "
+    print(f"  gold provenance steps as share of **estimation points** {ss['gold_provenance_share_of_estimation_points']['mean']:.4f} "
           f"CI{ss['gold_provenance_share_of_estimation_points']['ci95']}")
 
-    for key, label in (("judge_vs_own_baseline", "LLM judge（基线=全部步）"),
-                       ("causal_vs_own_baseline", "因果 top-1（基线=估值点）")):
+    for key, label in (("judge_vs_own_baseline", "LLM judge (baseline=all steps)"),
+                       ("causal_vs_own_baseline", "causal top-1 (baseline=estimation points)")):
         b = res[key]
         d = b["diff"]
         obs = b["observed"]
@@ -220,50 +221,50 @@ def main() -> int:
             "correct_baseline_estimation_points")
         if "note" in obs:
             continue
-        print(f"\n=== {label} 落在 gold 溯源步 ===")
-        print(f"  观测 {obs['mean']:.4f} CI{obs['ci95']}   "
-              f"正确基线 {base['mean']:.4f} CI{base['ci95']}")
+        print(f"\n=== {label} landing on gold provenance steps ===")
+        print(f"  observed {obs['mean']:.4f} CI{obs['ci95']}   "
+              f"correct baseline {base['mean']:.4f} CI{base['ci95']}")
         if "note" not in d:
-            print(f"  差值 {d['diff']:+.4f} CI[{d['ci95'][0]:+.4f}, {d['ci95'][1]:+.4f}]"
-                  f"  {'显著' if d['significant'] else '不显著'}")
+            print(f"  diff {d['diff']:+.4f} CI[{d['ci95'][0]:+.4f}, {d['ci95'][1]:+.4f}]"
+                  f"  {'significant' if d['significant'] else 'not significant'}")
 
     fc = res["fair_comparison_same_space"]
     if "note" not in fc["judge"]:
-        print(f"\n=== 同空间公平对比（n={fc['n']}）===")
-        print(f"  judge {fc['judge']['mean']:.4f}   因果 {fc['causal']['mean']:.4f}")
+        print(f"\n=== Fair same-space comparison (n={fc['n']}) ===")
+        print(f"  judge {fc['judge']['mean']:.4f}   causal {fc['causal']['mean']:.4f}")
         d = fc["diff"]
         if "note" not in d:
-            print(f"  差值 {d['diff']:+.4f} CI[{d['ci95'][0]:+.4f}, {d['ci95'][1]:+.4f}]"
-                  f"  {'显著' if d['significant'] else '不显著'}")
+            print(f"  diff {d['diff']:+.4f} CI[{d['ci95'][0]:+.4f}, {d['ci95'][1]:+.4f}]"
+                  f"  {'significant' if d['significant'] else 'not significant'}")
 
-    print(f"\n=== 结构规则复现 judge 的 top-1（精确同步命中）===")
-    print(f"{'规则':<18}{'一致率':>9}{'闭式chance':>12}   差值 CI")
+    print(f"\n=== Structural rules reproducing the judge's top-1 (exact same-step hit) ===")
+    print(f"{'rule':<18}{'agreement':>9}{'chance':>12}   diff CI")
     for r in RULES:
         b = res["RULE_AGREEMENT_WITH_JUDGE"][r]
         if "note" in b["agreement"]:
-            print(f"{r:<18} 无样本")
+            print(f"{r:<18} no samples")
             continue
         d = b["diff"]
         ds = (f"{d['diff']:+.4f} CI[{d['ci95'][0]:+.4f},{d['ci95'][1]:+.4f}] "
-              f"{'显著' if d['significant'] else '不显著'}") if "note" not in d else "—"
+              f"{'significant' if d['significant'] else 'not significant'}") if "note" not in d else "-"
         print(f"{r:<18}{b['agreement']['mean']:>9.4f}"
               f"{b['closed_form_chance']['mean']:>12.4f}   {ds}")
 
     p = res["position"]
-    print(f"\n  judge 平均相对位置 {p['judge_mean_pos']['mean']:.4f}   "
-          f"因果 {p['causal_mean_pos']['mean']:.4f}")
-    print(f"  R3 未命中时 judge 的选择类别 {res['residual_when_R3_misses']}")
+    print(f"\n  judge mean relative position {p['judge_mean_pos']['mean']:.4f}   "
+          f"causal {p['causal_mean_pos']['mean']:.4f}")
+    print(f"  judge's pick category when R3 misses {res['residual_when_R3_misses']}")
     wc = res["WITHIN_CLASS_position"]
     if "note" not in wc["observed"]:
         d = wc["diff"]
-        print(f"\n=== 类内位置：judge 在 gold 溯源步之中挑哪一个 ===")
-        print(f"  归一化靠后程度 {wc['observed']['mean']:.4f} CI{wc['observed']['ci95']}"
-              f"   均匀零假设 0.5")
+        print(f"\n=== Within-class position: which gold provenance step the judge picks ===")
+        print(f"  normalized lateness {wc['observed']['mean']:.4f} CI{wc['observed']['ci95']}"
+              f"   uniform null 0.5")
         if "note" not in d:
-            print(f"  差值 {d['diff']:+.4f} CI[{d['ci95'][0]:+.4f}, {d['ci95'][1]:+.4f}]"
-                  f"  {'显著' if d['significant'] else '不显著'}")
-        print(f"  每 instance 平均 {wc['mean_n_gold_steps_per_instance']['mean']:.2f} "
-              f"个 gold 溯源步 → 类内随机猜中率 "
+            print(f"  diff {d['diff']:+.4f} CI[{d['ci95'][0]:+.4f}, {d['ci95'][1]:+.4f}]"
+                  f"  {'significant' if d['significant'] else 'not significant'}")
+        print(f"  mean {wc['mean_n_gold_steps_per_instance']['mean']:.2f} "
+              f"gold provenance steps per instance → within-class random hit rate "
               f"{wc['uniform_within_class_agreement']['mean']:.4f}")
     print(f"\n→ {args.out}")
     return 0

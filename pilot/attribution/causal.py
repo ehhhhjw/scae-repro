@@ -1,16 +1,16 @@
-"""因果归因：用 fork-resample 估计 anytime 价值 v_t，导出 Δ_t 与根因步。
+"""Causal attribution: estimate the anytime value v_t by fork-resample, then derive Δ_t and the root-cause step.
 
-v_t = E[Y | τ_1:t]，用同前缀续跑 m 次的成功率估计。
-Δ_t = v_t − v_{t-1}（Theorem 1，相对策略基线的因果贡献 + 观测项）。
+v_t = E[Y | τ_1:t], estimated by the success rate of m continuations sharing the same prefix.
+Δ_t = v_t − v_{t-1} (Theorem 1, causal contribution relative to the policy baseline + observation term).
 
-对失败 run（Y=0），"根因步" = 使结果最受损的步 = argmin_t Δ_t
-（Δ_t 最负 = 走到这一步后成功概率掉得最多）。
-对成功 run，argmax_t Δ_t = 最关键的正确步。
+For a failed run (Y=0), the "root-cause step" = the step that hurt the outcome most = argmin_t Δ_t
+(most negative Δ_t = success probability drops the most after reaching this step).
+For a successful run, argmax_t Δ_t = the most decisive correct step.
 
-配对设计（CRN）：所有 v_t 共享同一条被截断的前缀，环境噪声由确定性工具面钉死，
-因此 v_t 与 v_{t-1} 的差主要反映第 t 步的效应而非采样噪声。
+Paired design (CRN): all v_t share the same truncated prefix and environment noise is pinned down by a deterministic
+tool surface, so the gap between v_t and v_{t-1} mainly reflects the effect of step t rather than sampling noise.
 
-成本：连续窗口上 v_t 复用为 v_{t-1} 的后项，K 个连续步只需 (K+1) 个 fork 点 × m 次。
+Cost: over a contiguous window v_t is reused as the trailing term of v_{t-1}, so K contiguous steps need only (K+1) fork points × m runs.
 """
 
 from __future__ import annotations
@@ -28,9 +28,9 @@ from pilot.probes import task as T                                       # noqa:
 
 @dataclass
 class StepValue:
-    t: int                       # 步序（v_t 中的 t）；t=0 表示执行前先验 v_0
-    v_hat: float                 # 成功率估计
-    n: int                       # 采样次数 m
+    t: int                       # step index (the t in v_t); t=0 is the pre-execution prior v_0
+    v_hat: float                 # success-rate estimate
+    n: int                       # number of samples m
     successes: int
     ys: list[int] = field(default_factory=list)
 
@@ -47,12 +47,12 @@ def estimate_v(
     turn_timeout: float,
     target_file: str | None = None,
 ) -> StepValue:
-    """估计 v_t = E[Y | τ_1:t]：保留前 t 步，续跑 m 次到底，取成功率。
+    """Estimate v_t = E[Y | τ_1:t]: keep the first t steps, run m continuations to completion, take the success rate.
 
-    t=0：不保留任何步（只留 meta/user prompt），估计执行前先验 v_0。
-    target_file 非空时估计 per-file 值 v_t^(f) = E[Y_f | τ_1:t]，
-    其中 Y_f = 1[f ∈ F̂]（见 DESIGN_v2 §4.1.1：单文件任务全对，
-    信号在多文件任务的"漏文件"上，故把归因目标细化到单个 gold 文件）。
+    t=0: keep no steps (only meta/user prompt), estimating the pre-execution prior v_0.
+    When target_file is set, estimate the per-file value v_t^(f) = E[Y_f | τ_1:t],
+    where Y_f = 1[f ∈ F̂] (see DESIGN_v2 §4.1.1: single-file tasks are all correct,
+    the signal lies in the "missed files" of multi-file tasks, so the attribution target is refined to a single gold file).
     """
     if t == 0:
         prefix = _prefix_zero(base_items)
@@ -76,10 +76,10 @@ def estimate_v(
         pth = thread_rollout_path(fk)
         ans = T.answer_from_rollout(R.load(pth)) if pth and Path(pth).exists() else None
         if target_file == "__recall__":
-            # 连续结果变量：recall ∈ [0,1]。
-            # 修 Δ≡0 退化（实测 50% 的 case：被漏文件在所有前缀下 v_t^(f)≡0，
-            # 单文件二元结果无法区分任何步骤）。recall 保留其他 gold 文件的命中变化，
-            # 信号不消失。Theorem 1 的可加分解对有界连续结果同样成立。
+            # Continuous outcome variable: recall ∈ [0,1].
+            # Fixes the Δ≡0 degeneracy (measured on 50% of cases: v_t^(f)≡0 for the missed file under every prefix,
+            # so a single-file binary outcome cannot separate any step). recall retains hit changes on the other gold
+            # files, so the signal does not vanish. Theorem 1's additive decomposition also holds for bounded continuous outcomes.
             ys.append(T.outcome(ans, inst.gold)["recall"])
         elif target_file is None:
             ys.append(T.outcome(ans, inst.gold)["Y"])
@@ -90,7 +90,7 @@ def estimate_v(
 
 
 def _prefix_zero(items: list[dict]) -> list[dict]:
-    """v_0 的前缀：保留到第一个 function_call 之前（即只有 meta + user prompt）。"""
+    """Prefix for v_0: keep everything before the first function_call (i.e. only meta + user prompt)."""
     st = R.steps(items)
     if not st:
         return items
@@ -108,10 +108,10 @@ def causal_attribution(
     window: tuple[int, int] | None = None,
     turn_timeout: float = 600.0,
 ) -> dict:
-    """对一条 trace 做因果归因。
+    """Causal attribution for one trace.
 
-    window: (lo, hi) 只估计这段连续步的 v_t（含 v_{lo-1} 作为基线）。None=全轨迹。
-    返回 v_t 序列、Δ_t 序列、根因步（top-1/top-3）、可加性残差。
+    window: (lo, hi) estimates v_t only over this contiguous range (including v_{lo-1} as baseline). None = whole trace.
+    Returns the v_t sequence, the Δ_t sequence, root-cause steps (top-1/top-3), and the additivity residual.
     """
     st = R.steps(base_items)
     n = len(st)
@@ -120,7 +120,7 @@ def causal_attribution(
 
     workdir.mkdir(parents=True, exist_ok=True)
     values: dict[int, StepValue] = {}
-    for t in range(lo - 1, hi + 1):          # 含 v_{lo-1} 作为第一个差分的基线
+    for t in range(lo - 1, hi + 1):          # include v_{lo-1} as the baseline for the first difference
         values[t] = estimate_v(srv, base_items, t, inst, workdir,
                                model, provider, m, turn_timeout)
 
@@ -134,7 +134,7 @@ def causal_attribution(
             "action": f"{a}#{b}", "tool": st[t - 1].tool,
         })
 
-    # 根因步：失败最受损 = argmin Δ；也给 |Δ| 最大
+    # root-cause step: most harmful on failure = argmin Δ; also report the largest |Δ|
     by_min = sorted(deltas, key=lambda d: d["delta"])
     by_absmax = sorted(deltas, key=lambda d: -abs(d["delta"]))
     return {
@@ -144,7 +144,7 @@ def causal_attribution(
         "v0": round(values[0].v_hat, 4) if 0 in values else round(values[lo - 1].v_hat, 4),
         "v_final": round(values[hi].v_hat, 4),
         "deltas": deltas,
-        "rootcause_top1_min": by_min[0] if by_min else None,      # 最伤结果的步
+        "rootcause_top1_min": by_min[0] if by_min else None,      # the step that hurt the outcome most
         "rootcause_top3_min": by_min[:3],
         "rootcause_top1_absmax": by_absmax[0] if by_absmax else None,
         "sum_delta": round(sum(d["delta"] for d in deltas), 4),
@@ -152,12 +152,12 @@ def causal_attribution(
 
 
 def normalized_position(t: int, n_steps: int) -> float:
-    """步位归一化到 (0,1]，供 D3 步位偏移检验。"""
+    """Normalize step position to (0,1], for the D3 step-position shift test."""
     return t / n_steps if n_steps else 0.0
 
 
 # ---------------------------------------------------------------------------
-# 混合估计器（V5 发现 positivity 分步 → 按熵自适应）DESIGN_v2 §3.5.1
+# Hybrid estimator (V5 found positivity varies by step → adapt on entropy) DESIGN_v2 §3.5.1
 # ---------------------------------------------------------------------------
 
 def estimate_policy_at(
@@ -165,9 +165,9 @@ def estimate_policy_at(
     workdir: Path, model: str | None, provider: str | None,
     m: int, turn_timeout: float,
 ) -> dict:
-    """估计第 t 步的策略分布 π̂_t（同前缀 fork m 次，只采第 t 步动作），返回动作桶计数与熵。
+    """Estimate the policy distribution π̂_t at step t (fork m times on the same prefix, sampling only the step-t action); returns action-bucket counts and entropy.
 
-    用于判断该步是高熵（fork-resample 可用）还是低熵（需软干预）。
+    Used to decide whether the step is high-entropy (fork-resample usable) or low-entropy (needs soft intervention).
     """
     import math
     from collections import Counter
@@ -208,11 +208,11 @@ def hybrid_delta_at(
     workdir: Path, model: str | None, provider: str | None,
     m: int, turn_timeout: float, tau_H: float = 0.0,
 ) -> dict:
-    """混合估计第 t 步的因果贡献 Δ_t。
+    """Hybrid estimate of the causal contribution Δ_t of step t.
 
-    高熵步：观测式 fork-resample（v_t − v_{t-1}）。
-    低熵步：软干预 —— 用 substitute_action 注入 oracle 动作（读 gold 文件），
-            真实执行拿真 output，续跑 m 次，估相对当前（确定性）动作的效应。
+    High-entropy step: observational fork-resample (v_t − v_{t-1}).
+    Low-entropy step: soft intervention -- inject an oracle action (read the gold file) via substitute_action,
+            execute it for real to get a real output, run m continuations, and estimate the effect relative to the current (deterministic) action.
     """
     from pilot.harness import action_exec as AE
 
@@ -227,7 +227,7 @@ def hybrid_delta_at(
                 "delta": round(v_t.v_hat - v_p.v_hat, 4),
                 "v_t": round(v_t.v_hat, 4), "v_prev": round(v_p.v_hat, 4)}
 
-    # 低熵步：软干预。替代动作 = oracle（读 gold），估 do(a_oracle) 相对 do(a_observed)
+    # low-entropy step: soft intervention. Substitute action = oracle (read gold), estimating do(a_oracle) vs do(a_observed)
     tool, args, cmd = AE.oracle_action(inst)
     T.reset_repo(inst)
     real_out = AE.exec_readonly_action(inst.repo, cmd)
@@ -246,9 +246,9 @@ def hybrid_delta_at(
         ans = T.answer_from_rollout(R.load(pth)) if pth and Path(pth).exists() else None
         ys.append(T.outcome(ans, inst.gold)["Y"])
     v_steer = sum(ys) / len(ys) if ys else 0.0
-    # 观测动作的价值 = v_t（保留原第 t 步）
+    # value of the observed action = v_t (keeping the original step t)
     v_obs = estimate_v(srv, base_items, t, inst, workdir, model, provider, m, turn_timeout)
     return {"t": t, "mode": "soft_intervention", "entropy": pi["entropy"],
             "delta_steer_minus_obs": round(v_steer - v_obs.v_hat, 4),
             "v_steer_oracle": round(v_steer, 4), "v_observed": round(v_obs.v_hat, 4),
-            "note": "低熵步：正的 delta 表示注入 oracle 动作能提升成功率（该步是瓶颈）"}
+            "note": "low-entropy step: a positive delta means injecting the oracle action raises the success rate (this step is the bottleneck)"}

@@ -1,16 +1,16 @@
-"""并行执行编排 —— 全量实验的必需组件。
+"""Parallel execution orchestration -- a required component for the full-scale experiment.
 
-实测串行速度：单次 fork 续跑 ~200s（29 步任务）。全量归因 71 任务串行需 ~71h。
-并行化后（W=6）可压到 ~12h。
+Measured serial speed: one fork continuation takes ~200s (29-step task). Full attribution
+over 71 tasks would take ~71h serially. Parallelized (W=6) this compresses to ~12h.
 
-隔离要点（每个 worker 必须完全独立，否则会互相污染）：
-  - 独立 CODEX_HOME（含各自 config.toml）→ rollout 不混
-  - 独立 AppServer 子进程 → JSON-RPC 不串
-  - **仓库隔离**：多个 worker 同时 reset 同一个仓库会互相破坏。
-    因此按 instance_id 分片，保证同一仓库目录同一时刻只被一个 worker 使用。
-  - 独立结果文件，最后合并（避免并发写同一 jsonl）
+Isolation essentials (each worker must be fully independent, otherwise they contaminate each other):
+  - separate CODEX_HOME (each with its own config.toml) -> rollouts do not mix
+  - separate AppServer subprocess -> JSON-RPC streams do not cross
+  - **repository isolation**: multiple workers resetting the same repo concurrently destroy each other.
+    Hence we shard by instance_id, guaranteeing a given repo directory is used by exactly one worker at a time.
+  - separate result files, merged at the end (avoids concurrent writes to the same jsonl)
 
-用法：作为库被 run_full.py 调用；也可直接跑
+Usage: called as a library by run_full.py; can also be run directly
     python -m pilot.harness.parallel --cmd locate --workers 6 --out pilot/runs/full_locate
 """
 
@@ -30,16 +30,16 @@ from pilot.probes import task as T  # noqa: E402
 
 
 def shard_by_repo(instance_ids: list[str], n_shards: int) -> list[list[str]]:
-    """按仓库分片：同一 instance 的仓库目录只归一个 shard。
+    """Shard by repository: the repo directory of a given instance belongs to exactly one shard.
 
-    数据集里每个 instance_id 有自己独立的仓库目录（projects/<instance_id>），
-    所以实际上不存在跨 instance 的目录竞争；但按 project 分组仍有好处：
-    同一 project 的仓库大小相近，能让各 shard 负载更均衡。
+    In the dataset each instance_id has its own separate repo directory (projects/<instance_id>),
+    so there is in fact no cross-instance directory contention; but grouping by project still helps:
+    repos within the same project have similar sizes, which balances the load across shards.
     """
     by_proj: dict[str, list[str]] = {}
     for iid in instance_ids:
         by_proj.setdefault(iid.split("__")[0], []).append(iid)
-    # 贪心装箱：按组大小降序，塞进当前最小的 shard
+    # Greedy bin packing: groups in descending size, into the currently smallest shard
     shards: list[list[str]] = [[] for _ in range(n_shards)]
     for proj in sorted(by_proj, key=lambda p: -len(by_proj[p])):
         for iid in by_proj[proj]:
@@ -52,7 +52,7 @@ def launch_locate_shards(
     instance_ids: list[str], out_root: Path, workers: int,
     model: str, provider: str, k: int, turn_timeout: float,
 ) -> list[subprocess.Popen]:
-    """并行启动定位 runner，每 shard 一个进程。"""
+    """Launch localization runners in parallel, one process per shard."""
     out_root.mkdir(parents=True, exist_ok=True)
     shards = shard_by_repo(instance_ids, workers)
     procs = []
@@ -73,7 +73,7 @@ def launch_locate_shards(
             env={**os.environ},
         )
         procs.append(p)
-        print(f"  shard{i}: {len(ids)} 实例 → PID {p.pid}", flush=True)
+        print(f"  shard{i}: {len(ids)} instances → PID {p.pid}", flush=True)
     return procs
 
 
@@ -82,7 +82,7 @@ def launch_attr_shards(
     model: str, provider: str, m: int, window_points: int,
     outcome: str, turn_timeout: float,
 ) -> list[subprocess.Popen]:
-    """并行启动归因，每 shard 一个进程（输入已按 shard 切好的 results.jsonl）。"""
+    """Launch attribution in parallel, one process per shard (inputs are results.jsonl already split by shard)."""
     procs = []
     for i, rd in enumerate(runs_dirs):
         log = open(rd / "attr.log", "w")
@@ -110,16 +110,16 @@ def wait_and_report(procs: list[subprocess.Popen], label: str,
         alive = [p for p in procs if p.poll() is None]
         if not alive:
             break
-        print(f"[{label}] {len(procs)-len(alive)}/{len(procs)} shard 完成 "
+        print(f"[{label}] {len(procs)-len(alive)}/{len(procs)} shards done "
               f"({(time.time()-t0)/60:.0f}min)", flush=True)
         time.sleep(poll)
     codes = [p.returncode for p in procs]
-    print(f"[{label}] 全部完成，退出码 {codes}，用时 {(time.time()-t0)/60:.1f}min",
+    print(f"[{label}] all done, exit codes {codes}, elapsed {(time.time()-t0)/60:.1f}min",
           flush=True)
 
 
 def merge_jsonl(shard_dirs: list[Path], fname: str, out: Path) -> int:
-    """合并各 shard 的 jsonl。"""
+    """Merge the jsonl of each shard."""
     n = 0
     with open(out, "w", encoding="utf-8") as fh:
         for d in shard_dirs:
@@ -154,17 +154,17 @@ def main() -> int:
         ids = [i.instance_id for i in insts]
         if args.limit > 0:
             ids = ids[: args.limit]
-        print(f"全量定位：{len(ids)} 实例，{args.workers} 并行")
+        print(f"full-scale localization: {len(ids)} instances, {args.workers} in parallel")
         procs = launch_locate_shards(ids, out_root, args.workers,
                                      args.model, args.model_provider,
                                      args.k, args.turn_timeout)
         wait_and_report(procs, "locate")
         shard_dirs = sorted(out_root.glob("shard*"))
         n = merge_jsonl(shard_dirs, "results.jsonl", out_root / "results.jsonl")
-        print(f"合并 {n} 条结果 → {out_root/'results.jsonl'}")
+        print(f"merged {n} results → {out_root/'results.jsonl'}")
     else:
         shard_dirs = sorted(out_root.glob("shard*"))
-        print(f"全量归因：{len(shard_dirs)} shard")
+        print(f"full-scale attribution: {len(shard_dirs)} shards")
         procs = launch_attr_shards(shard_dirs, out_root, args.workers,
                                    args.model, args.model_provider, args.m,
                                    args.window_points, args.outcome,
@@ -172,7 +172,7 @@ def main() -> int:
         wait_and_report(procs, "attr")
         n = merge_jsonl(shard_dirs, "attribution.jsonl",
                         out_root / "attribution.jsonl")
-        print(f"合并 {n} 条归因 → {out_root/'attribution.jsonl'}")
+        print(f"merged {n} attributions → {out_root/'attribution.jsonl'}")
     return 0
 
 

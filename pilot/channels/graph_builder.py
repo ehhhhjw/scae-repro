@@ -1,25 +1,26 @@
-"""按仓库隔离的构图 + 聚类编排器（通道 B 数据层）。
+"""Per-repository isolated graph construction + clustering orchestrator (channel B data layer).
 
-为什么需要这一层
-----------------
-上游两套工具的输出路径都是**硬编码常量**：
-  AST_Tree_Graph:   src/split_file/const.py 中 VERSION="v9"，OUTPUT_DIR=Output/v9
-  rag-python-tools: 产物固定命名 .output/cluster/v9_*.json
-连续对多个仓库构图会**互相覆盖**（实测：astropy-7606 产物已被 12907 覆盖）。
-499 仓库若不隔离则无法全量。
+Why this layer is needed
+------------------------
+The output paths of both upstream tools are **hard-coded constants**:
+  AST_Tree_Graph:   VERSION="v9" in src/split_file/const.py, OUTPUT_DIR=Output/v9
+  rag-python-tools: artifacts fixed at .output/cluster/v9_*.json
+Building graphs for several repos back to back **overwrites them** (observed: the
+astropy-7606 artifacts had already been overwritten by 12907).
+Without isolation, 499 repos cannot be processed at full scale.
 
-设计原则：**不修改上游代码**，在外层做"跑一个 → 校验 → 归档 → 下一个"，
-已归档的仓库幂等跳过。
+Design principle: **do not modify upstream code**; do "run one -> validate -> archive ->
+next" in an outer layer, skipping already-archived repos idempotently.
 
-产物布局
---------
+Artifact layout
+---------------
     pilot/runs/graphs/<instance_id>/
-        entities.json              实体 + 关系（含 LineNumber，用于内容级归因）
-        dependency_graph.json      文件级 import 图
-        cluster_communities.json   社区级统计（cut_ratio / boundary_weight）
-        cluster_entities.json      每实体 CommunityId
+        entities.json              entities + relations (with LineNumber, for content-level attribution)
+        dependency_graph.json      file-level import graph
+        cluster_communities.json   community-level statistics (cut_ratio / boundary_weight)
+        cluster_entities.json      CommunityId per entity
         cluster_report.json        modularity / noise
-        meta.json                  仓库路径、耗时、归档校验
+        meta.json                  repo path, elapsed time, archive validation
 """
 
 from __future__ import annotations
@@ -69,24 +70,24 @@ def build_one(repo: Path, instance_id: str, do_cluster: bool = True,
         if p.returncode != 0:
             meta["graph_stderr"] = p.stderr[-400:]
     except subprocess.TimeoutExpired:
-        meta.update(graph_rc=-1, error=f"构图超时 {timeout}s")
+        meta.update(graph_rc=-1, error=f"graph build timed out after {timeout}s")
         (out / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
         return meta
     meta["graph_sec"] = round(time.time() - t0, 1)
 
-    # 校验产物确实属于本仓库 —— 防止把别的仓库数据归档过来
+    # Verify the artifacts really belong to this repo -- prevents archiving another repo's data
     dg = AST_OUT / "dependency_graph.json"
     if dg.exists():
         try:
             root = json.loads(dg.read_text()).get("root_dir", "")
             meta["root_dir_check"] = root
             if Path(root).resolve() != repo.resolve():
-                meta["error"] = f"root_dir 不匹配: {root}"
+                meta["error"] = f"root_dir mismatch: {root}"
                 (out / "meta.json").write_text(
                     json.dumps(meta, ensure_ascii=False, indent=2))
                 return meta
         except (json.JSONDecodeError, OSError) as e:
-            meta["error"] = f"dependency_graph 解析失败: {e}"
+            meta["error"] = f"dependency_graph parse failed: {e}"
 
     if do_cluster and "error" not in meta:
         t1 = time.time()
@@ -100,9 +101,9 @@ def build_one(repo: Path, instance_id: str, do_cluster: bool = True,
                 if p2.returncode != 0:
                     meta["cluster_stderr"] = p2.stderr[-400:]
             except subprocess.TimeoutExpired:
-                meta.update(cluster_rc=-1, cluster_error="聚类超时")
+                meta.update(cluster_rc=-1, cluster_error="clustering timed out")
         else:
-            meta.update(cluster_rc=-2, cluster_error=f"聚类 venv 缺失: {py}")
+            meta.update(cluster_rc=-2, cluster_error=f"clustering venv missing: {py}")
         meta["cluster_sec"] = round(time.time() - t1, 1)
 
     copied = {}
@@ -127,7 +128,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--instances", nargs="*", default=None)
     ap.add_argument("--from-attr", default=None,
-                    help="从归因结果取 instance 列表（优先做有归因数据的仓库）")
+                    help="take the instance list from attribution results (prioritize repos that have attribution data)")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--no-cluster", action="store_true")
     ap.add_argument("--force", action="store_true")
@@ -148,14 +149,14 @@ def main() -> int:
         ids = ids[: args.limit]
 
     todo = [i for i in ids if args.force or not archived(i)]
-    print(f"目标 {len(ids)} 仓库，待处理 {len(todo)}（跳过已归档 {len(ids)-len(todo)}）")
+    print(f"target {len(ids)} repos, {len(todo)} to process (skipped {len(ids)-len(todo)} already archived)")
     GRAPHS_ROOT.mkdir(parents=True, exist_ok=True)
 
     times, n_ok = [], 0
     for k, iid in enumerate(todo, 1):
         inst = insts[iid]
         if not inst.repo.is_dir():
-            print(f"[{k}/{len(todo)}] {iid} 仓库不存在")
+            print(f"[{k}/{len(todo)}] {iid} repo does not exist")
             continue
         m = build_one(inst.repo, iid, do_cluster=not args.no_cluster,
                       timeout=args.timeout)
@@ -168,8 +169,8 @@ def main() -> int:
               f"ETA={eta:.0f}min {str(m.get('error',''))[:40]}", flush=True)
     if times:
         avg = sum(times) / len(times)
-        print(f"\n成功 {n_ok}/{len(todo)}；平均 {avg:.1f}s/仓库 → "
-              f"499 仓库约 {avg*499/3600:.1f}h")
+        print(f"\nsucceeded {n_ok}/{len(todo)}; avg {avg:.1f}s/repo → "
+              f"~{avg*499/3600:.1f}h for 499 repos")
     return 0
 
 

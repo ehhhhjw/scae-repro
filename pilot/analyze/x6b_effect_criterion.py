@@ -1,33 +1,35 @@
-"""X6b：X6 的那个 5 倍差值是真信号，还是**二值判据造出来的**？零 API。
+"""X6b: is X6's 5x difference a real signal, or **manufactured by the binary criterion**? Zero API.
 
-来由
-----
-X6 报告：低 H_tool 步的 EFFECT 率 0.013 vs 高 H_tool 步 0.066（5 倍），
-方向与 X4 的零结果（H_tool ~ U^exec，rho=−0.088 n.s.）**相反**。
-但 X6 的 EFFECT 是二值判据（逐点 p<0.05），全样本只有 7 个事件，
-所以那个 5 倍完全可能是阈值化的产物。
+Origin
+------
+X6 reported: EFFECT rate 0.013 at low-H_tool steps vs 0.066 at high-H_tool steps (5x),
+which is the **opposite** direction from X4's null result (H_tool ~ U^exec, rho=−0.088 n.s.).
+But X6's EFFECT is a binary criterion (pointwise p<0.05) with only 7 events in the whole
+sample, so that 5x could easily be an artifact of thresholding.
 
-本脚本的问题
-------------
-同一批点、同一个 H_tool，把响应变量从**二值 EFFECT** 换成**连续量**后，
-关系是否还在？三个响应变量：
+The question this script asks
+-----------------------------
+On the same points and the same H_tool, does the relationship survive when the response
+variable is switched from the **binary EFFECT** to a **continuous quantity**?
+Three response variables:
 
-  binary   1[p < 0.05]        （X6 的判据）
-  absdelta |Δ_t|              （效应量本身）
-  neglogp  −log10(p)          （证据强度，不丢信息）
+  binary   1[p < 0.05]        (X6's criterion)
+  absdelta |Δ_t|              (the effect size itself)
+  neglogp  −log10(p)          (evidence strength, discards no information)
 
-判据（预注册）
---------------
-| 结果 | 结论 |
+Criterion (preregistered)
+-------------------------
+| Result | Conclusion |
 |---|---|
-| 二值有关系、两个连续量都无 | 5 倍是**阈值化产物**，X6b 关闭该疑点，X4 的零结果不受挑战 |
-| 连续量也有关系 | X4 的零结果需要重新审视（可能是它的聚合方式掩盖了步级关系） |
-| 二值的关系本身经不起 bootstrap | 更简单的解释：n=7 的噪声 |
+| binary related, both continuous ones unrelated | the 5x is a **thresholding artifact**; X6b closes this doubt and X4's null result stands unchallenged |
+| the continuous quantities are related too | X4's null result needs revisiting (its aggregation may have masked a step-level relationship) |
+| the binary relationship itself fails bootstrap | simpler explanation: n=7 noise |
 
-逐点 p 值的算法
----------------
-每个估值段有 ys_t（m 次重放的 recall）与 ys_prev。检验 Δ≠0 用两样本置换检验
-（把 2m 个值合并后重排，统计量 = 均值差的绝对值），与 X5 一致。
+How the pointwise p values are computed
+---------------------------------------
+Each estimation segment has ys_t (recall over m replays) and ys_prev. Δ≠0 is tested with a
+two-sample permutation test (pool the 2m values and reshuffle; statistic = absolute mean
+difference), consistent with X5.
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ B_PERM = 2000
 
 def perm_p(a: list[float], b: list[float], n_perm: int = B_PERM,
            seed: int = SEED) -> float:
-    """两样本置换检验的双侧 p（统计量=|均值差|）。"""
+    """Two-sided p of a two-sample permutation test (statistic = |mean difference|)."""
     obs = abs(statistics.mean(a) - statistics.mean(b))
     pool = a + b
     na = len(a)
@@ -75,7 +77,7 @@ def main() -> int:
     ap.add_argument("--alpha", type=float, default=0.05)
     args = ap.parse_args()
 
-    # H_tool 协变量（全局工具转移模型）
+    # H_tool covariate (global tool-transition model)
     trans: dict[str, Counter] = defaultdict(Counter)
     step_tool: dict[str, list[str]] = {}
     for p in sorted(Path(args.runs_root).glob("shard*/rollouts/*.jsonl")):
@@ -121,9 +123,9 @@ def main() -> int:
             })
     n = len(rows)
     n_eff = int(sum(x["binary"] for x in rows))
-    print(f"逐点样本 {n}，EFFECT (p<{args.alpha}) = {n_eff} ({n_eff/n:.1%})")
+    print(f"pointwise samples {n}, EFFECT (p<{args.alpha}) = {n_eff} ({n_eff/n:.1%})")
 
-    # H_tool 中位数分层（复现 X6 的做法）
+    # stratify at the H_tool median (reproducing X6's procedure)
     hs = sorted(x["h_tool"] for x in rows)
     med = hs[len(hs) // 2]
     lo = [x for x in rows if x["h_tool"] <= med]
@@ -141,7 +143,7 @@ def main() -> int:
         "CONTINUOUS_VS_BINARY": {},
         "SENSITIVITY_TO_ALPHA": {},
     }
-    # 二值差的 bootstrap（这是 X6 那个 5 倍的可靠性）
+    # bootstrap the binary difference (this is the reliability of X6's 5x)
     rng = random.Random(SEED)
     d = []
     for _ in range(4000):
@@ -156,12 +158,12 @@ def main() -> int:
         "significant": bool(d[100] > 0 or d[3899] < 0),
     }
 
-    # 三个响应变量与 H_tool 的关系
+    # relationship between H_tool and each of the three response variables
     for resp in ("binary", "absdelta", "neglogp"):
         res["CONTINUOUS_VS_BINARY"][f"h_tool_vs_{resp}"] = _spearman_boot(
             [x["h_tool"] for x in rows], [x[resp] for x in rows])
 
-    # 二值判据对阈值的敏感性
+    # sensitivity of the binary criterion to the threshold
     for a in (0.01, 0.05, 0.10, 0.20):
         b_lo = statistics.mean(1.0 if x["p"] < a else 0.0 for x in lo)
         b_hi = statistics.mean(1.0 if x["p"] < a else 0.0 for x in hi)
@@ -176,36 +178,36 @@ def main() -> int:
     cont_sig = (cb["h_tool_vs_absdelta"]["significant"]
                 or cb["h_tool_vs_neglogp"]["significant"])
     res["VERDICT"] = (
-        "二值有关系而连续量没有 ⇒ X6 的 5 倍是**阈值化产物**，X4 的零结果不受挑战"
+        "binary related but the continuous quantities are not ⇒ X6's 5x is a **thresholding artifact**; X4's null result stands unchallenged"
         if bin_sig and not cont_sig else
-        "连续量也有关系 ⇒ 需重新审视 X4 的零结果"
+        "the continuous quantities are related too ⇒ X4's null result needs revisiting"
         if cont_sig else
-        "二值与连续量**都无**关系 ⇒ X6 的 5 倍是 n 过小的噪声，"
-        "该疑点关闭且不构成对 X4 的挑战")
+        "**neither** binary nor continuous is related ⇒ X6's 5x is noise from too small an n; "
+        "this doubt is closed and poses no challenge to X4")
 
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
     st = res["STRATIFIED"]
-    print(f"\n=== 复现 X6 的分层（H_tool 中位数 {med:.4f} 分割）===")
-    print(f"  低 H_tool EFFECT 率 {st['low_H_effect_rate']} (n={st['low_H_n']})")
-    print(f"  高 H_tool EFFECT 率 {st['high_H_effect_rate']} (n={st['high_H_n']})")
+    print(f"\n=== X6's stratification reproduced (split at the H_tool median {med:.4f}) ===")
+    print(f"  low H_tool EFFECT rate {st['low_H_effect_rate']} (n={st['low_H_n']})")
+    print(f"  high H_tool EFFECT rate {st['high_H_effect_rate']} (n={st['high_H_n']})")
     b = st["binary_diff_high_minus_low"]
-    print(f"  差值 {b['diff']:+.4f} CI{b['ci95']}  "
-          f"{'显著' if b['significant'] else '**不显著**'}")
+    print(f"  difference {b['diff']:+.4f} CI{b['ci95']}  "
+          f"{'significant' if b['significant'] else '**not significant**'}")
 
-    print(f"\n=== 换成连续响应变量后（同一批 {n} 个点、同一个 H_tool）===")
+    print(f"\n=== after switching to continuous response variables (same {n} points, same H_tool) ===")
     for k, v in cb.items():
         print(f"  {k:<22} rho={v['rho']:+.4f} CI{v['ci95']}  "
-              f"{'显著' if v['significant'] else '不显著'}")
+              f"{'significant' if v['significant'] else 'not significant'}")
 
-    print(f"\n=== 二值判据对阈值的敏感性 ===")
-    print(f"{'alpha':<10}{'n_effect':>10}{'低H率':>9}{'高H率':>9}{'比值':>8}")
+    print(f"\n=== sensitivity of the binary criterion to the threshold ===")
+    print(f"{'alpha':<10}{'n_effect':>10}{'lowH':>9}{'highH':>9}{'ratio':>8}")
     for k, v in res["SENSITIVITY_TO_ALPHA"].items():
         print(f"{k:<10}{v['n_effect']:>10}{v['low_H_rate']:>9}{v['high_H_rate']:>9}"
               f"{str(v['ratio']):>8}")
 
-    print(f"\n=== 裁决 ===\n  {res['VERDICT']}")
+    print(f"\n=== verdict ===\n  {res['VERDICT']}")
     print(f"\n→ {args.out}")
     return 0
 

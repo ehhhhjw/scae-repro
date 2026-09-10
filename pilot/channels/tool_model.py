@@ -1,24 +1,26 @@
-"""V1 通道 A：工具关系的数学模型。零 API。
+"""V1 channel A: a mathematical model of tool relations. Zero API.
 
-状态空间的选择（实测决定）
-------------------------
-codex 只暴露 3 个名义工具，其中 exec_command 占 8159/8200 —— 名义 API 层是
-单点分布，熵恒为 0，不携带信息。真正的语义工具在 shell 命令头里：
+Choice of state space (decided empirically)
+-------------------------------------------
+codex exposes only 3 nominal tools, of which exec_command accounts for 8159/8200 --
+the nominal API layer is a point mass, its entropy is identically 0 and carries no
+information. The real semantic tools live in the shell command head:
   sed 2763 / grep 2266 / git 1862 / ls 470 / find 212 / python 145 / rg 143 ...
-因此工具状态空间建在**命令头**上。这本身是一个可写进论文的观察：
-工具关系必须在语义层建模，名义 API 层退化。
+The tool state space is therefore built over **command heads**. This is itself an
+observation worth writing up: tool relations must be modeled at the semantic layer,
+because the nominal API layer degenerates.
 
-模型
-----
-  M0 边际      P(tool)                                基线
-  M1 一阶      P(tool_{t+1} | tool_t)                 + Dirichlet 平滑
-  M2 条件      P(tool_{t+1} | tool_t, ctx_t)          ctx = (上一步是否命中, 步位分档)
-  M3 repeat    P = 1[tool_{t+1} = tool_t]             trivial 基线（曾打败我们的模型）
+Models
+------
+  M0 marginal    P(tool)                                baseline
+  M1 first-order P(tool_{t+1} | tool_t)                 + Dirichlet smoothing
+  M2 conditional P(tool_{t+1} | tool_t, ctx_t)          ctx = (whether previous step hit, step-position bucket)
+  M3 repeat      P = 1[tool_{t+1} = tool_t]             trivial baseline (which once beat our model)
 
-评估
-----
-leave-one-repository-out 的 perplexity 与 top-1/top-3；
-另报每个决策点的条件熵 H(P(tool_{t+1}|·))，它是 U^tool_t 的定义。
+Evaluation
+----------
+leave-one-repository-out perplexity plus top-1/top-3;
+we also report the conditional entropy H(P(tool_{t+1}|·)) at each decision point, which is the definition of U^tool_t.
 """
 
 from __future__ import annotations
@@ -38,17 +40,17 @@ from pilot.harness import rollout as R                      # noqa: E402
 from pilot.probes import task as T                          # noqa: E402
 
 _CMD = re.compile(r'"cmd"\s*:\s*"([^"\s]+)')
-# 命令头归一：环境变量前缀、路径、别名
+# Command-head normalization: env-var prefixes, paths, aliases
 _ENVPREFIX = re.compile(r"^[A-Z_][A-Z0-9_]*=")
 
 
 def tool_of(step) -> str:
-    """把一步映射到语义工具（命令头）。"""
+    """Map one step to its semantic tool (the command head)."""
     m = _CMD.search(step.args_raw or "")
     if not m:
         return step.tool
     head = m.group(1)
-    # 去掉 VAR=x 前缀形式
+    # Strip the VAR=x prefix form
     if _ENVPREFIX.match(head):
         return "envset"
     head = head.split("/")[-1]
@@ -58,7 +60,7 @@ def tool_of(step) -> str:
 
 
 def ctx_of(step, t: int, n_steps: int) -> str:
-    """少量可观测上下文：上一步是否有实质输出 × 步位分档。"""
+    """A small amount of observable context: whether the previous step produced substantive output × step-position bucket."""
     out = step.output_text or ""
     hit = "hit" if len(out.strip()) >= 40 else "miss"
     frac = t / max(1, n_steps)
@@ -67,7 +69,7 @@ def ctx_of(step, t: int, n_steps: int) -> str:
 
 
 def load_sequences(runs_root: Path) -> list[dict]:
-    """每条 rollout -> 工具序列 + 上下文序列。"""
+    """Each rollout -> tool sequence + context sequence."""
     insts = {i.instance_id: i for i in T.load_instances()}
     out = []
     for f in sorted(runs_root.glob("shard*/rollouts/*.jsonl")):
@@ -129,7 +131,7 @@ def prob_cond(m: dict, cur: str, ctx: str, nxt: str, vocab: list[str],
               back1: dict | None, back0: dict | None) -> float:
     a = m["alpha"]
     row = m["trans"].get((cur, ctx))
-    if not row or sum(row.values()) < 5:          # 样本不足则退化到一阶
+    if not row or sum(row.values()) < 5:          # back off to first order on insufficient samples
         return (prob_first(m=back1, cur=cur, nxt=nxt, vocab=vocab, fallback=back0)
                 if back1 else 1 / len(vocab))
     return (row.get(nxt, 0) + a) / (sum(row.values()) + a * len(vocab))
@@ -149,8 +151,8 @@ def main() -> int:
     seqs = load_sequences(Path(args.runs_root))
     vocab = sorted({t for s in seqs for t in s["tools"]})
     n_trans = sum(len(s["tools"]) - 1 for s in seqs)
-    print(f"载入 {len(seqs)} 条序列，{n_trans} 个步转移，工具词表 {len(vocab)}")
-    print(f"工具词表: {vocab}")
+    print(f"loaded {len(seqs)} sequences, {n_trans} step transitions, tool vocabulary {len(vocab)}")
+    print(f"tool vocabulary: {vocab}")
 
     projects = sorted({s["project"] for s in seqs})
     stats = {k: {"logp": 0.0, "n": 0, "hit1": 0, "hit3": 0}
@@ -190,7 +192,7 @@ def main() -> int:
                         st["hit1"] += 1
                     if nxt in ranked[:3]:
                         st["hit3"] += 1
-                # U^tool_t：M2 分布的条件熵
+                # U^tool_t: conditional entropy of the M2 distribution
                 ent_rows.append({
                     "instance_id": s["instance_id"], "project": s["project"],
                     "t": i + 1, "cur_tool": cur, "ctx": ctx,
@@ -221,15 +223,15 @@ def main() -> int:
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    print(f"\n=== V1 工具转移模型（LORO over {len(projects)} repos）===")
-    print(f"{'模型':<14}{'perplexity':>12}{'top-1':>9}{'top-3':>9}")
+    print(f"\n=== V1 tool transition models (LORO over {len(projects)} repos) ===")
+    print(f"{'model':<14}{'perplexity':>12}{'top-1':>9}{'top-3':>9}")
     for name in ("M0_marginal", "M1_first", "M2_cond", "M3_repeat"):
         if name in res["models"]:
             m = res["models"][name]
             print(f"{name:<14}{m['perplexity']:>12}{m['top1']:>9}{m['top3']:>9}")
     u = res["U_tool"]
-    print(f"\nU^tool 条件熵: mean={u['mean']} median={u['median']} "
-          f"p10={u['p10']} p90={u['p90']}  (上界 log|V|={u['max_possible']})")
+    print(f"\nU^tool conditional entropy: mean={u['mean']} median={u['median']} "
+          f"p10={u['p10']} p90={u['p90']}  (upper bound log|V|={u['max_possible']})")
     print(f"\n→ {args.out}")
     return 0
 

@@ -1,35 +1,36 @@
-"""V3k：用执行溯源图解释**因果归因**。零 API（消费已有的 full_attr 结果）。
+"""V3k: explain **causal attribution** with the execution provenance graph. Zero API (consumes existing full_attr results).
 
-可证伪的结构预测
-----------------
-outcome 是 gold 文件的 recall。若 trace 溯源图刻画了因果结构，则：
+Falsifiable structural prediction
+---------------------------------
+The outcome is recall of the gold files. If the trace provenance graph captures the causal structure, then:
 
-    因果效应 Δ_t 应集中在「把 gold 文件送进 agent 观测史」的那些步上。
+    the causal effect Δ_t should concentrate on the steps that "feed a gold file into the agent's observation history".
 
-具体地，把每一步按它与 gold 的溯源关系分三类：
-  visit_gold   该步直接操作了某个 gold 文件
-  mention_gold 该步的**输出**里提到了某个 gold 文件（agent 由此得知它存在）
-  first_gold   该步是**首次**让某个 gold 文件进入观测史的步（溯源图上 gold 的来源）
-  none         与 gold 无溯源关系
+Concretely, classify every step into three categories by its provenance relation to gold:
+  visit_gold   the step directly operated on some gold file
+  mention_gold the step's **output** mentioned some gold file (this is how the agent learns it exists)
+  first_gold   the step that **first** brought some gold file into the observation history (the origin of gold on the provenance graph)
+  none         no provenance relation to gold
 
-预测：|Δ_t| 在 first_gold / visit_gold 上显著大于 none。
+Prediction: |Δ_t| is significantly larger on first_gold / visit_gold than on none.
 
-为何这是有力的检验
-------------------
-它把**廉价的结构量**（溯源关系，读 rollout 即可算）与**昂贵的干预估计**
-（fork-replay 的 Δ_t，每点 m=8 次续跑）对上。三档走向都有意义：
+Why this is a strong test
+------------------------
+It pairs a **cheap structural quantity** (the provenance relation, computable by just reading the
+rollout) with an **expensive intervention estimate** (fork-replay Δ_t, m=8 continuations per point).
+All three outcomes are meaningful:
 
-| 结果 | 含义 |
+| Result | Meaning |
 |---|---|
-| Δ 集中在 gold 溯源步 | 溯源图**解释**了因果结构 → 可用结构量做廉价归因筛选 |
-| Δ 与溯源无关 | 效应经由别的通道（如停止策略）传导 → 支持"必须干预"的主线 |
-| Δ 反向集中 | 溯源关系构造有误，需回查 |
+| Δ concentrates on gold provenance steps | the provenance graph **explains** the causal structure → structural quantities can be used for cheap attribution screening |
+| Δ unrelated to provenance | the effect propagates via another channel (e.g. the stopping policy) → supports the "intervention is mandatory" main line |
+| Δ concentrates in reverse | the provenance relation is built wrong, needs re-checking |
 
-统计纪律
---------
-基线用**闭式期望**而非采样（踩坑 #15）：对每个 instance，
-"随机取一个估值点命中 gold 溯源步"的概率 = 该 instance 内 gold 溯源步占比，
-再对 instance 平均。CI 用 instance 级 bootstrap。
+Statistical discipline
+----------------------
+The baseline uses a **closed-form expectation** rather than sampling (pitfall #15): for each instance,
+the probability that "a randomly drawn valuation point lands on a gold provenance step" = the share of
+gold provenance steps within that instance, then averaged over instances. CI uses instance-level bootstrap.
 """
 
 from __future__ import annotations
@@ -54,7 +55,7 @@ SEED = 20260814
 
 def boot_ci(vals: list[float], b: int = 2000, seed: int = SEED) -> dict:
     if not vals:
-        return {"note": "无样本"}
+        return {"note": "no samples"}
     rng = random.Random(seed)
     pts = []
     for _ in range(b):
@@ -68,7 +69,7 @@ def boot_ci(vals: list[float], b: int = 2000, seed: int = SEED) -> dict:
 
 def paired_ci(a: list[float], b: list[float], bnum: int = 2000) -> dict:
     if len(a) != len(b) or not a:
-        return {"note": f"点集不匹配 {len(a)} vs {len(b)}"}
+        return {"note": f"point sets do not match {len(a)} vs {len(b)}"}
     rng = random.Random(SEED)
     pts = []
     for _ in range(bnum):
@@ -82,7 +83,7 @@ def paired_ci(a: list[float], b: list[float], bnum: int = 2000) -> dict:
 
 
 def _rankdata(v: list[float]) -> list[float]:
-    """平均秩（处理并列）。"""
+    """Average ranks (handles ties)."""
     idx = sorted(range(len(v)), key=lambda i: v[i])
     r = [0.0] * len(v)
     i = 0
@@ -107,7 +108,7 @@ def _pearson(a: list[float], b: list[float]) -> float:
 
 
 def _spearman_boot(xs: list[float], ys: list[float], b: int = 2000) -> dict:
-    """Spearman rho + bootstrap CI。"""
+    """Spearman rho + bootstrap CI."""
     rho = _pearson(_rankdata(xs), _rankdata(ys))
     rng = random.Random(SEED)
     pts = []
@@ -123,9 +124,9 @@ def _spearman_boot(xs: list[float], ys: list[float], b: int = 2000) -> dict:
 
 
 def gold_relation(steps, gold: set[str]) -> dict[int, dict]:
-    """每步与 gold 的溯源关系。返回 {step_idx(1-based): flags}。"""
+    """Provenance relation of each step to gold. Returns {step_idx(1-based): flags}."""
     rel: dict[int, dict] = {}
-    gold_seen: set[str] = set()          # 已进入观测史的 gold
+    gold_seen: set[str] = set()          # gold already in the observation history
     for s in steps:
         p = parse_step(s)
         obj = (p.path or p.obj or "").lstrip("./")
@@ -164,18 +165,18 @@ def main() -> int:
         for line in f.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 recs.append(json.loads(line))
-    print(f"载入 {len(recs)} 条归因记录")
+    print(f"loaded {len(recs)} attribution records")
 
-    # 逐点：|Δ| 按溯源类别
+    # per point: |Δ| by provenance class
     abs_by_cls: dict[str, list[float]] = defaultdict(list)
-    # instance 级配对：instance 内 gold 溯源步的平均|Δ| vs 非 gold 步的平均|Δ|
+    # instance-level pairing: mean |Δ| of gold provenance steps vs non-gold steps within an instance
     pair_gold, pair_none = [], []
-    # top-1 是否落在 gold 溯源步（vs 闭式期望）
+    # whether top-1 lands on a gold provenance step (vs closed-form expectation)
     top1_hit, top1_chance = [], []
     judge_hit, judge_chance = [], []
     n_used = n_skip = 0
     cls_counts: Counter = Counter()
-    pos_delta: list[tuple[float, float]] = []      # (归一化位置, |Δ|) 供功效检验
+    pos_delta: list[tuple[float, float]] = []      # (normalized position, |Δ|) for the power check
     inst_means: list[float] = []
 
     for r in recs:
@@ -212,42 +213,42 @@ def main() -> int:
         if g_vals and n_vals:
             pair_gold.append(statistics.mean(g_vals))
             pair_none.append(statistics.mean(n_vals))
-        # top-1：因果 vs judge
+        # top-1: causal vs judge
         share = sum(1 for t, _ in pts if rel[t]["any_gold"]) / len(pts)
         t1 = r.get("causal_top1_step")
         if t1 in rel:
             top1_hit.append(1.0 if rel[t1]["any_gold"] else 0.0)
-            top1_chance.append(share)           # 闭式期望，不采样
+            top1_chance.append(share)           # closed-form expectation, no sampling
         jt = r.get("judge_full_top1_step")
         if jt in rel:
             judge_hit.append(1.0 if rel[jt]["any_gold"] else 0.0)
             judge_chance.append(share)
 
-    # ---- 功效检验：先证明 |Δ| 不是纯噪声，否则"不集中"只是检不出 ----
-    # 踩坑 #17：负面结果发表前必须先证明测量工具本身有效。
-    # 若 |Δ| 与位置等别的量有显著关系，说明它有可被检出的结构，
-    # 那么"与 gold 溯源无关"才是实质结论而非功效不足。
+    # ---- power check: first prove |Δ| is not pure noise, else "no concentration" is merely undetectable ----
+    # pitfall #17: before publishing a negative result, first prove the measurement instrument works.
+    # If |Δ| has a significant relation to some other quantity such as position, it has detectable
+    # structure, and then "unrelated to gold provenance" is a substantive conclusion, not low power.
     pos_pairs = [(p, d) for p, d in pos_delta]
     power = {}
     if len(pos_pairs) >= 20:
         xs = [p for p, _ in pos_pairs]
         ys = [d for _, d in pos_pairs]
         power["spearman_absdelta_vs_position"] = _spearman_boot(xs, ys)
-    # 实例间异质性：各 instance 的 mean|Δ| 是否比"同一总体"预期更分散
+    # between-instance heterogeneity: whether the per-instance mean|Δ| is more dispersed than a "single population" predicts
     if len(inst_means) >= 10:
         power["between_instance_mean_absdelta"] = boot_ci(inst_means)
         power["between_instance_sd"] = round(statistics.stdev(inst_means), 4)
     power["nonzero_delta_share"] = boot_ci(
         [1.0 if d > 1e-9 else 0.0 for _, d in pos_pairs])
-    # 功效更高的检验：|Δ|>0 这个二元事件是否与 gold 溯源有关
-    # （比比较均值敏感，因为不受少数大 Δ 主导）
+    # a higher-power test: whether the binary event |Δ|>0 is related to gold provenance
+    # (more sensitive than comparing means, since it is not dominated by a few large Δ)
     nz_gold = [1.0 if d > 1e-9 else 0.0 for d in abs_by_cls["first_gold"]
                + abs_by_cls["visit_gold"] + abs_by_cls["mention_gold"]]
     nz_none = [1.0 if d > 1e-9 else 0.0 for d in abs_by_cls["none"]]
     power["nonzero_rate_gold_provenance"] = boot_ci(nz_gold)
     power["nonzero_rate_none"] = boot_ci(nz_none)
     if nz_gold and nz_none:
-        # 非配对两比例差的 bootstrap CI
+        # bootstrap CI for the unpaired difference of two proportions
         rng2 = random.Random(SEED)
         dd = []
         for _ in range(2000):
@@ -288,62 +289,62 @@ def main() -> int:
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    print(f"\n可用 {n_used} 个 instance（跳过 {n_skip}）")
+    print(f"\nusable: {n_used} instances (skipped {n_skip})")
     pw = res["POWER_CHECK"]
-    print(f"\n=== 功效检验：|Δ| 是否具有可检出的结构（先于任何负面结论）===")
+    print(f"\n=== power check: does |Δ| have detectable structure (prior to any negative conclusion) ===")
     sp = pw.get("spearman_absdelta_vs_position")
     if sp:
-        print(f"  |Δ| ~ 归一化步位  Spearman rho {sp['rho']:+.4f} "
+        print(f"  |Δ| ~ normalized step position  Spearman rho {sp['rho']:+.4f} "
               f"CI{sp['ci95']}  n={sp['n']}  "
-              f"{'显著' if sp['significant'] else '不显著'}")
+              f"{'significant' if sp['significant'] else 'not significant'}")
     nz = pw.get("nonzero_delta_share")
     if nz and "note" not in nz:
-        print(f"  |Δ|>0 的估值点占比 {nz['mean']:.4f} CI{nz['ci95']}")
+        print(f"  share of valuation points with |Δ|>0 {nz['mean']:.4f} CI{nz['ci95']}")
     for k in ("nonzero_rate_gold_provenance", "nonzero_rate_none"):
         v = pw.get(k)
         if v and "note" not in v:
             print(f"  {k:<32} {v['mean']:.4f} CI{v['ci95']} (n={v['n']})")
     dv = pw.get("nonzero_rate_diff_gold_minus_none")
     if dv:
-        print(f"  |Δ|>0 率之差(gold−none) {dv['diff']:+.4f} "
+        print(f"  |Δ|>0 rate difference (gold-none) {dv['diff']:+.4f} "
               f"CI[{dv['ci95'][0]:+.4f}, {dv['ci95'][1]:+.4f}]  "
-              f"{'显著' if dv['significant'] else '不显著'}")
+              f"{'significant' if dv['significant'] else 'not significant'}")
     if "between_instance_sd" in pw:
-        print(f"  instance 间 mean|Δ| 的标准差 {pw['between_instance_sd']}"
-              f"（均值 {pw['between_instance_mean_absdelta']['mean']}）")
+        print(f"  sd of mean|Δ| across instances {pw['between_instance_sd']}"
+              f" (mean {pw['between_instance_mean_absdelta']['mean']})")
 
-    print(f"\n=== 各类步的 |Δ|（逐点）===")
-    print(f"{'类别':<16}{'n':>6}{'mean|Δ|':>10}   CI")
+    print(f"\n=== |Δ| by step class (per point) ===")
+    print(f"{'class':<16}{'n':>6}{'mean|Δ|':>10}   CI")
     for k in ("first_gold", "visit_gold", "mention_gold", "none"):
         v = res["abs_delta_by_class"].get(k)
         if not v or "note" in v:
-            print(f"{k:<16} 无样本")
+            print(f"{k:<16} no samples")
             continue
         print(f"{k:<16}{v['n']:>6}{v['mean']:>10.4f}   CI{v['ci95']}")
 
     p = res["within_instance_paired"]
-    print(f"\n=== instance 内配对：gold 溯源步 vs 非 gold 步（n={p['n_instances']}）===")
+    print(f"\n=== within-instance pairing: gold provenance steps vs non-gold steps (n={p['n_instances']}) ===")
     if "note" not in p["gold_provenance_steps"]:
-        print(f"  gold 溯源步 mean|Δ| {p['gold_provenance_steps']['mean']:.4f} "
+        print(f"  gold provenance steps mean|Δ| {p['gold_provenance_steps']['mean']:.4f} "
               f"CI{p['gold_provenance_steps']['ci95']}")
-        print(f"  非 gold 步   mean|Δ| {p['non_gold_steps']['mean']:.4f} "
+        print(f"  non-gold steps        mean|Δ| {p['non_gold_steps']['mean']:.4f} "
               f"CI{p['non_gold_steps']['ci95']}")
         d = p["diff"]
-        print(f"  差值 {d['diff']:+.4f} CI[{d['ci95'][0]:+.4f}, {d['ci95'][1]:+.4f}]"
-              f"  {'显著' if d['significant'] else '不显著'}")
+        print(f"  diff {d['diff']:+.4f} CI[{d['ci95'][0]:+.4f}, {d['ci95'][1]:+.4f}]"
+              f"  {'significant' if d['significant'] else 'not significant'}")
 
-    for key, label in (("causal_top1_lands_on_gold_provenance", "因果 top-1"),
+    for key, label in (("causal_top1_lands_on_gold_provenance", "causal top-1"),
                        ("judge_top1_lands_on_gold_provenance", "LLM judge top-1")):
         b = res[key]
         if "note" in b["observed"]:
             continue
         d = b["diff"]
-        print(f"\n=== {label} 落在 gold 溯源步的比例（闭式期望为基线）===")
-        print(f"  观测 {b['observed']['mean']:.4f} CI{b['observed']['ci95']}   "
-              f"闭式期望 {b['closed_form_chance']['mean']:.4f} "
+        print(f"\n=== share of {label} landing on gold provenance steps (closed-form expectation as baseline) ===")
+        print(f"  observed {b['observed']['mean']:.4f} CI{b['observed']['ci95']}   "
+              f"closed-form expectation {b['closed_form_chance']['mean']:.4f} "
               f"CI{b['closed_form_chance']['ci95']}")
-        print(f"  差值 {d['diff']:+.4f} CI[{d['ci95'][0]:+.4f}, {d['ci95'][1]:+.4f}]"
-              f"  {'显著' if d['significant'] else '不显著'}")
+        print(f"  diff {d['diff']:+.4f} CI[{d['ci95'][0]:+.4f}, {d['ci95'][1]:+.4f}]"
+              f"  {'significant' if d['significant'] else 'not significant'}")
 
     print(f"\n→ {args.out}")
     return 0

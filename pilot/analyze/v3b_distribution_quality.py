@@ -1,24 +1,24 @@
-"""V3b：next-step 作为**概率分布**的质量评估（而非 top-1 精确命中）。
+"""V3b: evaluating next-step as a **probability distribution** (rather than an exact top-1 hit).
 
-为何重做评价
-------------
-V3 首轮我用 top-1 判定"对象通道失败"（0.2627 = repeat-prev），这是**判据用错**。
-next-step 的实际价值是回答"下一步可能做哪几件事、各自概率多少"，不是猜准唯一答案。
-被忽略的信号：top-3 = 0.4407、MRR = 0.395（真答案平均排第 2.5 位）。
+Why the evaluation was redone
+-----------------------------
+In the first V3 round I used top-1 to declare "the object channel fails" (0.2627 = repeat-prev), which is the **wrong criterion**.
+The real value of next-step is answering "which few things might come next and with what probabilities", not guessing the single answer.
+Signals that were ignored: top-3 = 0.4407, MRR = 0.395 (the true answer ranks 2.5th on average).
 
-本模块评估分布质量而非点命中：
-  1. top-k 曲线（k=1..10）—— 覆盖多少才够用
-  2. MRR / 平均命中排名
-  3. **校准性**：把预测概率分箱，看每箱的实际命中率是否匹配（这是核心）
-  4. 有效候选数 exp(H) —— "需要考虑几个候选"，直接对应 U^obj 的实用含义
-  5. NLL / perplexity —— 分布整体质量
-  6. 与三个基线的分布级对比（repeat-prev、边际频率、均匀）
+This module evaluates distribution quality rather than point hits:
+  1. top-k curve (k=1..10) -- how much coverage is enough
+  2. MRR / mean hit rank
+  3. **calibration**: bin the predicted probabilities and check whether each bin's actual hit rate matches (this is the core)
+  4. effective candidate count exp(H) -- "how many candidates must be considered", the practical meaning of U^obj
+  5. NLL / perplexity -- overall distribution quality
+  6. distribution-level comparison against three baselines (repeat-prev, marginal frequency, uniform)
 
-判据（预注册）
---------------
-  分布可用：ECE < 0.15 且 top-3 显著高于基线 top-3
-  部分可用：校准好但 top-k 不及基线 → 概率可信但排序无优势
-  不可用：校准差且 top-k 不及基线
+Criteria (preregistered)
+------------------------
+  distribution usable: ECE < 0.15 and top-3 clearly above baseline top-3
+  partially usable: well calibrated but top-k below baseline → probabilities trustworthy, ranking no better
+  unusable: poorly calibrated and top-k below baseline
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ def entropy(ps) -> float:
 
 
 def ece(pairs: list[tuple[float, int]], n_bins: int = 10) -> tuple[float, list]:
-    """pairs = [(预测概率, 是否命中)]。等宽分箱的 ECE + 每箱明细。"""
+    """pairs = [(predicted probability, hit or not)]. ECE over equal-width bins + per-bin detail."""
     if not pairs:
         return 0.0, []
     bins: list[list] = [[] for _ in range(n_bins)]
@@ -87,7 +87,7 @@ def main() -> int:
     for e in eps:
         by_repo[e["project"]].append(e)
     tool_vocab = sorted({s["tool"] for e in eps for s in e["seq"]})
-    print(f"载入 {len(eps)} episode，工具 {len(tool_vocab)} 类")
+    print(f"loaded {len(eps)} episodes, {len(tool_vocab)} tool types")
 
     hits = {k: 0 for k in KS}
     base_hits = {name: {k: 0 for k in KS}
@@ -97,7 +97,7 @@ def main() -> int:
     calib: list[tuple[float, int]] = []
     eff_cands: list[float] = []
     nll = 0.0
-    # 工具分布单独评估
+    # tool distribution evaluated separately
     tool_hits = {k: 0 for k in KS}
     tool_tot = 0
     tool_calib: list[tuple[float, int]] = []
@@ -117,7 +117,7 @@ def main() -> int:
                 if cur["node"]:
                     seen.add(cur["node"])
 
-                # ---------- 工具分布 ----------
+                # ---------- tool distribution ----------
                 pt = normalize({v: p_tool(tm, cur["tool"], v, tool_vocab)
                                 for v in tool_vocab})
                 tool_tot += 1
@@ -132,7 +132,7 @@ def main() -> int:
                     if v != nxt["tool"]:
                         tool_calib.append((pt[v], 0))
 
-                # ---------- 对象分布 ----------
+                # ---------- object distribution ----------
                 if not nxt["node"]:
                     continue
                 cands = obj_candidates(g, cur["node"], seen)
@@ -148,13 +148,13 @@ def main() -> int:
                     if pos <= k:
                         hits[k] += 1
                 nll += -math.log(max(po[nxt["node"]], 1e-12))
-                # 校准：命中项 + 最多 20 个未命中项（控制样本平衡）
+                # calibration: the hit item + at most 20 miss items (to keep the samples balanced)
                 calib.append((po[nxt["node"]], 1))
                 for c in ranked[:20]:
                     if c != nxt["node"]:
                         calib.append((po[c], 0))
 
-                # 基线
+                # baselines
                 rp = {c: (1.0 if c == cur["node"] else 0.0) for c in cands}
                 mg = {c: float(objfreq.get(c, 0)) for c in cands}
                 un = {c: 1.0 for c in cands}
@@ -167,7 +167,7 @@ def main() -> int:
                             base_hits[name][k] += 1
 
     if not tot:
-        print("无有效决策点")
+        print("no valid decision points")
         return 0
 
     e_obj, det_obj = ece(calib)
@@ -199,32 +199,32 @@ def main() -> int:
     o = res["object_distribution"]
     b3 = max(res["baselines_topk"][n]["top3"] for n in res["baselines_topk"])
     res["verdict"] = (
-        f"分布可用：ECE={o['ECE']} <0.15 且 top-3={o['topk']['top3']} > 基线 {b3}"
+        f"distribution usable: ECE={o['ECE']} <0.15 and top-3={o['topk']['top3']} > baseline {b3}"
         if o["ECE"] < 0.15 and o["topk"]["top3"] > b3 else
-        f"部分可用：ECE={o['ECE']}（校准{'好' if o['ECE']<0.15 else '差'}），"
-        f"top-3={o['topk']['top3']} vs 基线 {b3}"
+        f"partially usable: ECE={o['ECE']} (calibration {'good' if o['ECE']<0.15 else 'poor'}), "
+        f"top-3={o['topk']['top3']} vs baseline {b3}"
     )
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    print(f"\n=== V3b 对象分布质量（n={tot}）===")
+    print(f"\n=== V3b object distribution quality (n={tot}) ===")
     print(f"  top-k: {o['topk']}")
-    print(f"  MRR={o['MRR']}  平均排名={o['mean_rank']}  中位排名={o['median_rank']}")
+    print(f"  MRR={o['MRR']}  mean_rank={o['mean_rank']}  median_rank={o['median_rank']}")
     print(f"  ECE={o['ECE']}  NLL={o['NLL']}  perplexity={o['perplexity']}")
-    print(f"  有效候选数 exp(H): mean={o['mean_effective_candidates']} "
+    print(f"  effective candidates exp(H): mean={o['mean_effective_candidates']} "
           f"median={o['median_effective_candidates']}")
-    print("\n  基线 top-k:")
+    print("\n  baseline top-k:")
     for n_, v in res["baselines_topk"].items():
         print(f"    {n_:<12} {v}")
     tl = res["tool_distribution"]
-    print(f"\n=== 工具分布（n={tl['n']}）===")
+    print(f"\n=== tool distribution (n={tl['n']}) ===")
     print(f"  top-k: {tl['topk']}  ECE={tl['ECE']}  "
-          f"有效候选={tl['mean_effective_candidates']}")
-    print("\n  对象分布校准分箱:")
+          f"effective candidates={tl['mean_effective_candidates']}")
+    print("\n  object distribution calibration bins:")
     for d in det_obj[:8]:
-        print(f"    {d['bin']:<12} n={d['n']:<5} 预测={d['mean_pred']:<8} "
-              f"实际={d['actual_rate']}")
-    print(f"\n裁决: {res['verdict']}")
+        print(f"    {d['bin']:<12} n={d['n']:<5} pred={d['mean_pred']:<8} "
+              f"actual={d['actual_rate']}")
+    print(f"\nverdict: {res['verdict']}")
     print(f"\n→ {args.out}")
     return 0
 

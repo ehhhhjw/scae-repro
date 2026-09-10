@@ -1,22 +1,22 @@
-# 会静默毁掉复现结果的坑
+# Pitfalls That Silently Ruin Reproduction Results
 
-按危险程度排序。**排在前面的几个不会报错，只会让数字变好看**——这是最难发现的一类失败。
+Ordered by severity. **The first few do not raise any error, they just make the numbers look better** -- this is the hardest class of failure to notice.
 
 ---
 
-## 1. ⚠️ 数据集工作区叠着 gold patch（泄题）
+## 1. ⚠️ Dataset workspace has the gold patch applied (answer leakage)
 
-**症状**：定位成功率明显高于论文的 93.99%，且没有任何报错。
+**Symptom**: localization success rate clearly above the paper's 93.99%, with no error at all.
 
-**原因**：分发的 SWE-bench 仓库快照，工作区常常处于**已修复**状态（gold patch 已应用），
-有的还带着 `procbench-*` 之类的 stash。定位任务必须跑在 buggy 的 `base_commit` 上，
-否则 agent 直接从自己的工作树里读到答案。
+**Cause**: the distributed SWE-bench repository snapshots often have the workspace in an **already-fixed** state (gold patch applied),
+some even carry a `procbench-*` stash. The localization task must run on the buggy `base_commit`,
+otherwise the agent reads the answer straight out of its own working tree.
 
-**本包的三道闸**：
+**The three gates in this package**:
 
-1. `setup/prepare_dataset.py --verify-only` —— 全量体检 HEAD 与工作区是否干净
-2. `setup/check_env.py` —— 抽查 20 个实例的 `base_commit`
-3. `pilot/probes/task.py::reset_repo` —— 每个实例跑之前强制
+1. `setup/prepare_dataset.py --verify-only` -- full check of whether HEAD and the workspace are clean
+2. `setup/check_env.py` -- spot-check the `base_commit` of 20 instances
+3. `pilot/probes/task.py::reset_repo` -- before every instance, force
    `checkout -f` + `reset --hard` + `clean -fdq`
 
 ```python
@@ -24,202 +24,202 @@ def reset_repo(inst):
     _git(repo, "checkout", "-f", inst.base_commit)
     _git(repo, "reset", "--hard", inst.base_commit)
     _git(repo, "clean", "-fdq")
-    return check_repo(inst)   # 断言：工作区干净 且 HEAD == base_commit
+    return check_repo(inst)   # assert: workspace clean AND HEAD == base_commit
 ```
 
-**不要为了省时间绕过 reset。** 论文 Appendix E.1 专门记了这一点：
-"同一条流水线跑在分发时的快照上，测的是一个能从自己工作树里读到答案的 agent，
-并且会在没有任何可见症状的情况下报出虚高的定位准确率。"
+**Do not bypass reset to save time.** Paper Appendix E.1 records this specifically:
+"Running the same pipeline on the as-distributed snapshot measures an agent that can read the answer
+out of its own working tree, and reports an inflated localization accuracy with no visible symptom."
 
 ---
 
-## 2. ⚠️ 环境噪声没钉死 → 重放不可比
+## 2. ⚠️ Environment noise not pinned down → replays are not comparable
 
-**症状**：`replay_check` 的一致率 < 1.00，或同一前缀重放出的轨迹莫名发散。
+**Symptom**: `replay_check` consistency rate < 1.00, or traces replayed from the same prefix inexplicably diverge.
 
-**原因**：locale / 时区 / 终端宽度 / 颜色 / hash seed / git pager 都会进入工具输出，
-从而进入上下文，从而改变策略。论文假设 3（可重放环境）要求这些全部固定。
+**Cause**: locale / timezone / terminal width / color / hash seed / git pager all enter tool output,
+hence enter the context, hence change the policy. Paper Assumption 3 (replayable environment) requires all of these to be fixed.
 
-**做法**：任何入口都要先 `source pilot/config/env_pin.sh`（`scripts/common.sh` 已代劳），
-其 Python 等价物是 `pilot/harness/appserver.py` 的 `PINNED_ENV`。
+**Practice**: every entry point must first `source pilot/config/env_pin.sh` (`scripts/common.sh` already does this for you),
+whose Python equivalent is `PINNED_ENV` in `pilot/harness/appserver.py`.
 
 ```bash
 LC_ALL=C  LANG=C  TZ=UTC  NO_COLOR=1  TERM=dumb  COLUMNS=200  LINES=50
 PYTHONHASHSEED=0  GIT_PAGER=cat  PAGER=cat  RIPGREP_CONFIG_PATH=/dev/null  CI=1
 ```
 
-**改一处必须改两处**：`env_pin.sh` 与 `PINNED_ENV` 不一致，会让 shell 起的进程与
-app-server 起的进程看到不同环境，这种偏差极难定位。
+**Change one place, you must change both**: if `env_pin.sh` and `PINNED_ENV` disagree, processes started by the shell and
+processes started by the app-server see different environments, and that kind of skew is extremely hard to localize.
 
 ---
 
-## 3. ⚠️ 续跑语在不同 arm 间不一致
+## 3. ⚠️ Continuation prompt inconsistent across arms
 
-**症状**：Δ_t 出现无法解释的系统性偏移。
+**Symptom**: unexplained systematic offset in Δ_t.
 
-**原因**：`CONTINUE_PROMPT`（"Continue."）进入上下文，因此**是估计量定义的一部分**。
-任何 arm 间的字面差异都变成一个未申报的干预。
+**Cause**: `CONTINUE_PROMPT` ("Continue.") enters the context, and therefore **is part of the estimand's definition**.
+Any literal difference across arms becomes an undeclared intervention.
 
-论文 Appendix C.1 把这列为两个"load-bearing 且容易违反"的实现不变量之一：
-续跑 prompt 必须在所有 arm 间**逐字节相同**。
-
----
-
-## 4. ⚠️ 编造替代动作的输出
-
-**症状**：干预分支的 Δ 看起来很干净，但不可复制。
-
-**原因**：`substitute_action(k, tool, args, output)` 的 `output` 必须是**真正执行** `args`
-得到的结果（`pilot/harness/action_exec.py::exec_readonly_action`）。
-填一个看起来合理的输出，就不再是 `do(A_t = a')`，而是在干预**观测**——
-两者是不同的因果量。
-
-这是 Appendix C.1 的第二个不变量。Algorithm 1 第 16 行写的是
-"**execute** a' for real in the reset repository ▷ never a fabricated output"。
+Paper Appendix C.1 lists this as one of two "load-bearing and easily violated" implementation invariants:
+the continuation prompt must be **byte-for-byte identical** across all arms.
 
 ---
 
-## 5. `rg` 在 shell 里可能是函数而不是二进制
+## 4. ⚠️ Fabricating the output of a substitute action
 
-**症状**：`action_exec` 的只读白名单校验通过，但实际执行行为与 agent 当时不同。
+**Symptom**: Δ from the intervention branch looks clean but is not reproducible.
 
-**原因**：`rg`/`grep` 可能被 shell 函数或 alias 覆盖。`action_exec.py` 的白名单按命令头
-匹配（`READONLY_CMDS`），但真正执行走 `shell=True`。
+**Cause**: the `output` in `substitute_action(k, tool, args, output)` must be the result of **actually executing** `args`
+(`pilot/harness/action_exec.py::exec_readonly_action`).
+Filling in a plausible-looking output is no longer `do(A_t = a')`, it is intervening on the **observation** --
+these are different causal quantities.
 
-**做法**：`env_pin.sh` 里 `RIPGREP_CONFIG_PATH=/dev/null` 消掉 ripgrep 的用户配置；
-执行时用 `PINNED_ENV` 而非继承的交互式 shell 环境。
-
----
-
-## 6. `shlex` 在 26.6% 的命令段上失败（论文已披露的缺陷）
-
-**症状**：查询信道 top-3 异常低（0.029）。
-
-**原因**：命令解析用 `shlex` 恢复搜索模式，遇到不平衡引号（如 `grep "a\b"`）会抛错，
-然后退回按空白切分，保留引号字符并截断。**75.3% 的 query 对象受影响**，
-其中 249 个塌缩成单个片段 `q: "def`。
-
-**论文的处理**：不静默修掉，而是重新实现一个不依赖 `shlex` 的解析器重跑 1661 个 query 步，
-结果把数字往**下**修（0.067 → 0.031）——即缺陷让 query 看起来比实际**更可预测**，
-所以它偏保守，不威胁"query 是瓶颈"的结论。见 Appendix D.5 与
-`pilot.analyze.x1d_query_channel`。
-
-**复现时**：不要"顺手修好" `parsed_command.py` 就直接和论文数字比对，
-两者口径会不同。
+This is the second invariant in Appendix C.1. Algorithm 1, line 16, says
+"**execute** a' for real in the reset repository ▷ never a fabricated output".
 
 ---
 
-## 7. 上下文压缩会破坏可识别性（不是变难估，是不可识别）
+## 5. `rg` in the shell may be a function rather than a binary
 
-**症状**：`compaction_lines()` 返回非空。
+**Symptom**: `action_exec`'s read-only allowlist check passes, but actual execution behavior differs from the agent's at the time.
 
-**原因**：压缩把 h_t 映射成 φ(h_t) 且不可逆。被丢掉的上下文成为**未观测混杂**，
-论文假设 1 失效，Proposition 1 的证明第 1 步不成立。
+**Cause**: `rg`/`grep` may be shadowed by a shell function or alias. The `action_exec.py` allowlist matches on the command head
+(`READONLY_CMDS`), but actual execution goes through `shell=True`.
 
-**论文报告的是 0 次压缩事件**（§5.2）。若你的运行出现非零：
-该轨迹的归因结论**不可直接采用**，不是"精度差一点"而是"该量不可识别"。
-
----
-
-## 8. 归因阶段需要预先摆好分片目录
-
-**症状**：`parallel --cmd attr` 什么都不做就退出。
-
-**原因**：attr 模式不自己挑实例，它要求 `--out` 下已存在 `shard*/`，
-每个 shard 内有 `results.jsonl` 与 `rollouts/`。原始实验里这步是手工做的。
-
-**做法**：用 `setup/stage_attr_shards.py`（`scripts/02_attribution.sh` 已自动调用）。
+**Practice**: `RIPGREP_CONFIG_PATH=/dev/null` in `env_pin.sh` removes ripgrep's user config;
+execution uses `PINNED_ENV` rather than the inherited interactive shell environment.
 
 ---
 
-## 9. 单文件实例做归因说不出话
+## 6. `shlex` fails on 26.6% of command segments (defect disclosed in the paper)
 
-**症状**：Δ_t 几乎全为 0，归因结论空洞。
+**Symptom**: query channel top-3 abnormally low (0.029).
 
-**原因**：以二值 Y 为结果时，单目标实例几乎必然被解决，多数替代动作不改变指示函数，
-于是 Δ_t ≡ 0。论文因此把归因限制在**多文件子集**（`--multifile-only`，
-`parallel.py` 已写死），并把结果变量换成 **recall over F\***
-（Appendix C.6：干预敏感度 2.505 vs 二值 1.643）。
+**Cause**: command parsing uses `shlex` to recover the search pattern; on unbalanced quotes (e.g. `grep "a\b"`) it throws,
+then falls back to whitespace splitting, keeping quote characters and truncating. **75.3% of query objects are affected**,
+of which 249 collapse into the single fragment `q: "def`.
 
-即便如此仍有 **22.9% 的 episode 完全退化**、**54.7% 的估值点 Δ 恰为 0** ——
-这本身是论文的结论（RQ4），不是 bug。
+**How the paper handles it**: not by silently fixing it, but by reimplementing a parser that does not depend on `shlex` and rerunning the 1661 query steps.
+The result moves the number **down** (0.067 → 0.031) -- i.e. the defect makes query look **more predictable** than it actually is,
+so it is conservative and does not threaten the "query is the bottleneck" conclusion. See Appendix D.5 and
+`pilot.analyze.x1d_query_channel`.
 
----
-
-## 10. 答案要从 rollout 里解析，不是从最终文本
-
-**症状**：定位结果偏低或缺失。
-
-**原因**：`<answer>` 块更可靠的来源是 rollout JSONL 而非会话末尾的文本。
-`pilot/probes/task.py` 同时提供 `parse_answer(text)` 与 `answer_from_rollout(items)`，
-后者是主路径。
+**When reproducing**: do not "just fix" `parsed_command.py` and then compare directly against the paper's numbers,
+the two definitions would differ.
 
 ---
 
-## 11. 判定口径有三个，别混用
+## 7. Context compaction breaks identifiability (not harder to estimate, but not identifiable)
 
-论文主口径是 **`gold ⊆ answer`（recall == 1）**，同时报两个敏感性口径：
+**Symptom**: `compaction_lines()` returns non-empty.
 
-| 口径 | 含义 | 数值 |
+**Cause**: compaction maps h_t to φ(h_t) irreversibly. The discarded context becomes an **unobserved confounder**,
+paper Assumption 1 fails, and step 1 of the Proposition 1 proof does not hold.
+
+**The paper reports 0 compaction events** (§5.2). If your run yields non-zero:
+the attribution conclusions for that trace are **not directly usable** -- not "slightly less precise" but "that quantity is not identifiable".
+
+---
+
+## 8. The attribution stage requires shard directories staged in advance
+
+**Symptom**: `parallel --cmd attr` exits without doing anything.
+
+**Cause**: attr mode does not pick instances itself, it requires `shard*/` to already exist under `--out`,
+with `results.jsonl` and `rollouts/` inside each shard. In the original experiment this step was done by hand.
+
+**Practice**: use `setup/stage_attr_shards.py` (`scripts/02_attribution.sh` already calls it automatically).
+
+---
+
+## 9. Single-file instances have nothing to say under attribution
+
+**Symptom**: Δ_t almost all 0, attribution conclusions vacuous.
+
+**Cause**: with binary Y as the outcome, single-target instances are almost always solved, and most substitute actions do not change the indicator,
+so Δ_t ≡ 0. The paper therefore restricts attribution to the **multi-file subset** (`--multifile-only`,
+hard-coded in `parallel.py`), and switches the outcome variable to **recall over F\***
+(Appendix C.6: intervention sensitivity 2.505 vs 1.643 for binary).
+
+Even so, **22.9% of episodes fully degenerate** and **54.7% of evaluation points have Δ exactly 0** --
+this is itself one of the paper's conclusions (RQ4), not a bug.
+
+---
+
+## 10. The answer must be parsed from the rollout, not from the final text
+
+**Symptom**: localization results low or missing.
+
+**Cause**: the more reliable source of the `<answer>` block is the rollout JSONL, not the text at the end of the session.
+`pilot/probes/task.py` provides both `parse_answer(text)` and `answer_from_rollout(items)`,
+the latter being the main path.
+
+---
+
+## 11. There are three verdict definitions, do not mix them
+
+The paper's primary definition is **`gold ⊆ answer` (recall == 1)**, with two sensitivity definitions also reported:
+
+| Definition | Meaning | Value |
 |---|---|---|
-| `recall == 1`（主） | F\* ⊆ F̂，允许多报 | **93.99%** |
-| 严格集合相等 | F\* == F̂ | 15.23% |
-| 过滤测试文件后相等 | 丢掉测试路径再比 | ≈ 主口径 |
+| `recall == 1` (primary) | F\* ⊆ F̂, over-reporting allowed | **93.99%** |
+| Strict set equality | F\* == F̂ | 15.23% |
+| Equality after filtering test files | drop test paths, then compare | ≈ primary |
 
-93.99% 与 15.23% 的巨大差距**全部由 agent 额外点名测试文件造成**（gold patch 不含测试）。
-论文因此把严格相等当作"agent 命名习惯"的诊断量，而非定位能力的度量。
-
----
-
-## 12. 截断后必须检查悬空 tool call
-
-**症状**：fork 出去的 rollout 被模型端拒绝。
-
-**原因**：截断可能留下有 `function_call` 而没有对应 `function_call_output` 的悬空调用。
-`truncate_before_step` / `truncate_including_step` 按构造安全，但任何**改写**路径
-（如 `substitute_action`、`mask_output_lines`）之后都要过
-`rollout.assert_no_dangling_calls()`。
+The huge gap between 93.99% and 15.23% is **entirely caused by the agent additionally naming test files** (the gold patch contains no tests).
+The paper therefore treats strict equality as a diagnostic for "the agent's naming habits", not as a measure of localization ability.
 
 ---
 
-## 13. 磁盘：完整产物约 17GB
+## 12. After truncation you must check for dangling tool calls
 
-| 目录 | 体量 | 离线分析是否需要 |
+**Symptom**: the forked rollout is rejected by the model endpoint.
+
+**Cause**: truncation may leave a dangling call that has a `function_call` with no corresponding `function_call_output`.
+`truncate_before_step` / `truncate_including_step` are safe by construction, but any **rewriting** path
+(e.g. `substitute_action`, `mask_output_lines`) must afterwards pass
+`rollout.assert_no_dangling_calls()`.
+
+---
+
+## 13. Disk: the full artifacts are about 17GB
+
+| Directory | Size | Needed for offline analysis |
 |---|---|---|
-| `v4prime/` | 5.3GB | 只需其中的 `attribution.jsonl`（140KB） |
-| `graphs/` | 3.4GB | RQ2 需要 |
-| `full_attr/` | 3.3GB | 只需 `attribution.jsonl`（156KB） |
-| `m8/` | 1.9GB | 否（m 稳健性检查，已移入 legacy） |
-| `full_locate/` | 1.4GB | **需要 `rollouts/`（85MB）与 `results.jsonl`（240KB）** |
+| `v4prime/` | 5.3GB | only `attribution.jsonl` within it (140KB) |
+| `graphs/` | 3.4GB | needed for RQ2 |
+| `full_attr/` | 3.3GB | only `attribution.jsonl` (156KB) |
+| `m8/` | 1.9GB | no (m robustness check, moved into legacy) |
+| `full_locate/` | 1.4GB | **needs `rollouts/` (85MB) and `results.jsonl` (240KB)** |
 
-绝大部分体量是 fork 的中间产物（`attr_work/`），**离线分析不需要**。
-只做路线 B 的话，约 90MB + `graphs/` 就够。
-
----
-
-## 14. 统计口径：约定先定，不能看完结果再挑
-
-论文 Appendix C.5 把统计约定固定下来，复现时不要替换：
-
-- 置信区间 = episode 级或 instance 级 **bootstrap**
-- 零假设 = **期内置换** 或 **闭式期望**，绝不用采样出来的"随机基线"
-- 排序指标用**随机打破平局的闭式期望**（计数式打分器平局极多，任意打破就是未申报的设计选择）
-- 不同候选集大小的预测器要放在**共同分母**上比（落在候选集外记 miss，
-  否则弃权就能买到准确率）
-- 多重比较 **BH-FDR，q = 0.10**，并区分探索性与验证性发现
-- Wilcoxon 在 n < 6 时拒绝给 p 值，而不是给一个不可靠的
+The vast majority of the size is fork intermediates (`attr_work/`), **not needed for offline analysis**.
+For route B only, about 90MB plus `graphs/` suffices.
 
 ---
 
-## 15. 论文有四项预注册没成立，别当成 bug 去"修"
+## 14. Statistical definitions: conventions fixed up front, no picking after seeing results
 
-Appendix E.2 的 Table 9 如实记录（复现时会重现这些"未达成"）：
+Paper Appendix C.5 fixes the statistical conventions; do not substitute your own when reproducing:
 
-| 预注册 | 结果 |
+- Confidence intervals = episode-level or instance-level **bootstrap**
+- Null hypothesis = **within-episode permutation** or **closed-form expectation**, never a sampled "random baseline"
+- Ranking metrics use the **closed-form expectation under random tie-breaking** (count-based scorers have many ties; breaking them arbitrarily is an undeclared design choice)
+- Predictors with different candidate-set sizes must be compared on a **common denominator** (falling outside the candidate set counts as a miss,
+  otherwise abstention buys accuracy)
+- Multiple comparisons **BH-FDR, q = 0.10**, distinguishing exploratory from confirmatory findings
+- Wilcoxon refuses to give a p-value when n < 6, rather than giving an unreliable one
+
+---
+
+## 15. Four of the paper's pre-registrations did not hold; do not treat them as bugs to "fix"
+
+Table 9 in Appendix E.2 records them faithfully (reproduction will reproduce these "not met" outcomes):
+
+| Pre-registration | Outcome |
 |---|---|
-| 熵随步位**单调衰减**（ρ ≤ −0.2） | **不支持**：ρ = +0.072，非单调（"确定–随机–确定"） |
-| v₀ 的 LORO AUROC ≥ 0.60 | **未达**：0.481（at chance），作为负结果报告 |
-| degenerate 率 30–40% | **优于预期**：22.9% |
-| D₁ top-1 分歧率落在 [40%,75%] | **判据退役**：观测 97.1%，但零假设本身也在 97.1% 附近 ⇒ 判据本身不成立 |
+| Entropy **decreases monotonically** with step position (ρ ≤ −0.2) | **Not supported**: ρ = +0.072, non-monotone ("certain-random-certain") |
+| LORO AUROC of v₀ ≥ 0.60 | **Not met**: 0.481 (at chance), reported as a negative result |
+| Degenerate rate 30-40% | **Better than expected**: 22.9% |
+| D₁ top-1 disagreement rate falls in [40%,75%] | **Criterion retired**: observed 97.1%, but the null hypothesis itself is also around 97.1% ⇒ the criterion itself does not hold |
 
-三个方向性预测（D₃ 位移、碰撞隔离、U_model 膨胀）都在预注册区间**之上**成立。
+All three directional predictions (D₃ displacement, collider isolation, U_model inflation) hold **above** their pre-registered intervals.

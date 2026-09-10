@@ -1,29 +1,29 @@
-"""E1 修复实验（RepairSuccess@1）—— 归因效用的可证伪检验。四臂 + 前置校验版。
+"""E1 repair experiment (RepairSuccess@1) -- a falsifiable test of attribution utility. Four arms + precheck version.
 
-设计教训（v1 失效）
-------------------
-v1 的 oracle 动作固定读 sorted(gold)[0]，但 11/19 的 case 实际漏掉的是**其他**
-gold 文件 —— 修错对象，三臂全零，实验无信息。首条结果即暴露，已归档。
-教训：任何需要 API 的干预实验，跑前必须零成本断言"干预指向正确对象"。
+Design lesson (v1 failed)
+-------------------------
+v1's oracle action always read sorted(gold)[0], but in 11/19 cases the file actually missed was a **different**
+gold file -- wrong object fixed, all three arms zero, the experiment uninformative. The very first result exposed it; archived.
+Lesson: any intervention experiment that needs API calls must first assert, at zero cost, that "the intervention points at the right object".
 
-四臂对照（两个对照缺一不可）
---------------------------
-  none          不干预，从 tau_{1:t-1} 续跑            基线
-  top1_missed   在 top-1 归因步注入"读**被漏**文件"    主效应
-  rand_missed   在**随机另一步**注入同一动作           位置对照
-  top1_irrelev  在 top-1 步注入"读**无关**文件"        内容对照
-
-只有位置对照 → 无法排除"注入任何内容都行"
-只有内容对照 → 无法排除"注入到任何位置都行"
-
-无关文件由 AST 依赖图定义（与所有 gold 距离 >=3 跳或不可达）。
-
-验收判据（预注册于 EXPERIMENT_DESIGN_v2.md §2.4）
+Four-arm design (neither control is dispensable)
 ------------------------------------------------
-  主判据    succ(top1_missed) - succ(none) 的配对 bootstrap CI 下界 > 0
-  位置特异  succ(top1_missed) > succ(rand_missed)
-  内容特异  succ(top1_missed) > succ(top1_irrelev)
-  失效判定  none 与 top1_missed 无差异 -> 归因未定位到因果步，如实报告
+  none          no intervention, continue from tau_{1:t-1}              baseline
+  top1_missed   inject "read the **missed** file" at the top-1 step     main effect
+  rand_missed   inject the same action at a **random other step**       position control
+  top1_irrelev  inject "read an **irrelevant** file" at the top-1 step  content control
+
+Position control only → cannot rule out "injecting anything works"
+Content control only → cannot rule out "injecting anywhere works"
+
+Irrelevant files are defined on the AST dependency graph (>=3 hops from every gold file, or unreachable).
+
+Acceptance criteria (preregistered in EXPERIMENT_DESIGN_v2.md §2.4)
+-------------------------------------------------------------------
+  main criterion     lower bound of the paired bootstrap CI on succ(top1_missed) - succ(none) > 0
+  position-specific  succ(top1_missed) > succ(rand_missed)
+  content-specific   succ(top1_missed) > succ(top1_irrelev)
+  failure verdict    none and top1_missed indistinguishable -> attribution did not localize the causal step, report faithfully
 """
 
 from __future__ import annotations
@@ -47,27 +47,27 @@ from pilot.probes import task as T                                       # noqa:
 
 
 # --------------------------------------------------------------------------
-# 零成本前置校验：跑前把不可用的 case 全部剔除，不浪费 API
+# Zero-cost precheck: drop every unusable case before running, so no API is wasted
 # --------------------------------------------------------------------------
 def precheck(rec: dict, inst, rollout_file: Path, idx) -> dict:
-    """返回 {ok, reason, target_missed, irrelev_cmd, ...}。"""
+    """Returns {ok, reason, target_missed, irrelev_cmd, ...}."""
     out = {"instance_id": rec["instance_id"], "ok": False}
     missed = rec.get("missed_files") or []
     if not missed:
-        out["reason"] = "无 missed_files（成功 case 不进 E1）"
+        out["reason"] = "no missed_files (successful cases do not enter E1)"
         return out
     t1 = rec.get("causal_top1_step")
     if not t1:
-        out["reason"] = "无 top1_step"
+        out["reason"] = "no top1_step"
         return out
     if not rollout_file.exists():
-        out["reason"] = "rollout 缺失"
+        out["reason"] = "rollout missing"
         return out
     try:
         items = R.load(rollout_file)
         steps = R.steps(items)
     except (OSError, ValueError) as e:
-        out["reason"] = f"rollout 解析失败: {e}"
+        out["reason"] = f"rollout parse failed: {e}"
         return out
     if t1 > len(steps):
         out["reason"] = f"top1_step={t1} > n_steps={len(steps)}"
@@ -75,26 +75,26 @@ def precheck(rec: dict, inst, rollout_file: Path, idx) -> dict:
 
     target = missed[0]
     if not (inst.repo / target).is_file():
-        out["reason"] = f"被漏文件不存在于工作区: {target}"
+        out["reason"] = f"missed file not present in the workspace: {target}"
         return out
 
-    # 断言 oracle 命令真实返回非空
+    # assert the oracle command really returns something non-empty
     T.reset_repo(inst)
     _, _, ocmd = AE.oracle_action(inst, target=target)
     o_out = AE.exec_readonly_action(inst.repo, ocmd)
     if len(o_out.strip()) < 20:
-        out["reason"] = f"oracle 输出过短({len(o_out)})"
+        out["reason"] = f"oracle output too short ({len(o_out)})"
         return out
 
-    # 无关文件（内容对照）
+    # irrelevant file (content control)
     irr = AE.irrelevant_action(inst, idx)
     if irr is None:
-        out["reason"] = "找不到 AST 图上距 gold >=3 跳的无关文件"
+        out["reason"] = "no irrelevant file >=3 hops from gold on the AST graph"
         return out
     _, _, icmd = irr
     i_out = AE.exec_readonly_action(inst.repo, icmd)
     if len(i_out.strip()) < 20:
-        out["reason"] = f"无关文件输出过短({len(i_out)})"
+        out["reason"] = f"irrelevant file output too short ({len(i_out)})"
         return out
 
     out.update({"ok": True, "reason": "", "target_missed": target,
@@ -106,7 +106,7 @@ def precheck(rec: dict, inst, rollout_file: Path, idx) -> dict:
 
 def continue_from(srv, fork_file: Path, inst, model, provider,
                   m: int, turn_timeout: float) -> list[float]:
-    """从给定历史 fork 并续跑 m 次，返回每次 recall。"""
+    """Fork from the given history and run m continuations; returns the recall of each."""
     out = []
     for _ in range(m):
         T.reset_repo(inst)
@@ -184,7 +184,7 @@ def main() -> int:
     ap.add_argument("--turn-timeout", type=float, default=900.0)
     ap.add_argument("--seed", type=int, default=17)
     ap.add_argument("--precheck-only", action="store_true",
-                    help="只跑零成本前置校验，不调 API")
+                    help="run only the zero-cost precheck, no API calls")
     args = ap.parse_args()
 
     outdir = Path(args.out_dir)
@@ -193,8 +193,8 @@ def main() -> int:
     recs = [json.loads(l) for l in Path(args.attr).read_text().splitlines() if l.strip()]
     recs = [r for r in recs if not r.get("error") and r.get("Y") == 0]
 
-    # ---------------- 阶段一：零成本前置校验 ----------------
-    print(f"=== 前置校验（{len(recs)} 个失败 case，零 API）===")
+    # ---------------- Phase 1: zero-cost precheck ----------------
+    print(f"=== precheck ({len(recs)} failed cases, zero API) ===")
     checks, usable = [], []
     for r in recs:
         inst = insts.get(r["instance_id"])
@@ -209,21 +209,21 @@ def main() -> int:
             idx = build_index(inst.repo)
         except (OSError, RecursionError) as e:
             checks.append({"instance_id": r["instance_id"], "ok": False,
-                           "reason": f"AST 索引失败: {e}"})
+                           "reason": f"AST index failed: {e}"})
             continue
         pc = precheck(r, inst, rf, idx)
         checks.append(pc)
         if pc["ok"]:
             usable.append((r, pc, rf))
         print(f"  {'OK ' if pc['ok'] else 'SKIP'} {r['instance_id'][:30]:<30} "
-              f"{pc.get('reason','') or ('漏='+pc['target_missed'].split('/')[-1])}")
+              f"{pc.get('reason','') or ('missed='+pc['target_missed'].split('/')[-1])}")
     (outdir / "precheck.json").write_text(
         json.dumps(checks, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"\n可用 {len(usable)}/{len(recs)}；校验结果 → {outdir/'precheck.json'}")
+    print(f"\nusable {len(usable)}/{len(recs)}; precheck results → {outdir/'precheck.json'}")
     if args.precheck_only or not usable:
         return 0
 
-    # ---------------- 阶段二：四臂干预 ----------------
+    # ---------------- Phase 2: four-arm intervention ----------------
     codex_home = outdir / "codex_home"
     write_codex_config(codex_home, args.model)
     rng = random.Random(args.seed)
@@ -253,7 +253,7 @@ def main() -> int:
                       f"irrel={res.get('succ_top1_irrelev')}", flush=True)
     finally:
         srv.close()
-    print(f"\n完成 {n} 条，用时 {(time.time()-t0)/60:.1f}min → {out_path}")
+    print(f"\ndone {n} records in {(time.time()-t0)/60:.1f}min → {out_path}")
     return 0
 
 

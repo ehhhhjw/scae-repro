@@ -1,22 +1,25 @@
-"""归因实验编排 —— C3 的入口。
+"""Attribution experiment orchestration -- the entry point for C3.
 
-对 runner 产出的 run（每条有 rollout 副本），对选定子集同时做：
-  1) 因果归因（causal.py）：fork-resample 估 Δ_t → top-1 根因步
-  2) full-trace judge 归因（judge.py）
-  3) prefix-only judge 归因（隔离碰撞偏差；prefix 取到 causal top-1 之前，避免泄露）
+For the runs produced by the runner (each with a rollout copy), run all of the following
+on a selected subset:
+  1) causal attribution (causal.py): fork-resample to estimate Δ_t → top-1 root-cause step
+  2) full-trace judge attribution (judge.py)
+  3) prefix-only judge attribution (isolates collider bias; the prefix is cut before the
+     causal top-1 to avoid leakage)
 
-产出 per-run jsonl，交给 analyze/attribution_compare.py 出 D1/D3。
+Produces a per-run jsonl, handed to analyze/attribution_compare.py to derive D1/D3.
 
-选谁做归因
-----------
-优先失败 run（Y=0，有明确"哪步害的"）。若失败样本不足，
-对成功 run 也做（问"哪步最关键"），C3 变为"关键步是否一致"。
-两种都记录 outcome_Y，分析时可分层。
+Which runs get attributed
+-------------------------
+Failed runs first (Y=0, where "which step hurt" is well defined). If failures are too few,
+also attribute successful runs (asking "which step mattered most"), turning C3 into
+"are the critical steps consistent". Both record outcome_Y so the analysis can stratify.
 
-成本控制
---------
-- 因果归因用窗口（默认在 trace 上等距取 W 个点，避免尾段偏置——D3 的方法学要求）
-- m 默认 4；judge 每 run 2 次调用（full + prefix）
+Cost control
+------------
+- causal attribution uses a window (by default W equidistant points along the trace, avoiding
+  tail bias -- a methodological requirement of D3)
+- m defaults to 4; the judge is called twice per run (full + prefix)
 """
 
 from __future__ import annotations
@@ -39,7 +42,7 @@ from pilot.attribution import judge as J                                 # noqa:
 
 
 def equidistant_window_points(n_steps: int, w: int) -> list[int]:
-    """在 [1, n] 上等距取 w 个点（含首尾附近），避免尾段偏置污染 D3。"""
+    """Take w equidistant points over [1, n] (including near both ends), so tail bias does not contaminate D3."""
     if n_steps <= w:
         return list(range(1, n_steps + 1))
     return sorted({max(1, round(1 + i * (n_steps - 1) / (w - 1))) for i in range(w)})
@@ -49,12 +52,13 @@ def causal_top1_over_points(
     srv, base_items, inst, workdir, model, provider, m, points, turn_timeout,
     target_file: str | None = None,
 ) -> dict:
-    """在指定离散点上估 v_t，取相邻点差分近似 Δ，返回 top-1（最负）步。
+    """Estimate v_t at the given discrete points, approximate Δ by differencing adjacent points, and return the top-1 (most negative) step.
 
-    target_file 非空 → per-file 归因：估 v_t^(f)，回答"哪一步决定了 f 是否被找到"
-    （DESIGN_v2 §4.1.1；被漏文件是最强负向信号）。
+    target_file non-empty → per-file attribution: estimate v_t^(f), answering "which step
+    decided whether f was found" (DESIGN_v2 §4.1.1; a missed file is the strongest negative signal).
 
-    注意：离散点上的差分是"段效应"近似，正式实验用连续窗口；pilot 为控成本用等距点。
+    Note: differencing over discrete points is a "segment effect" approximation; the full
+    experiment uses a continuous window, while the pilot uses equidistant points to control cost.
     """
     st = R.steps(base_items)
     vals = {}
@@ -66,11 +70,13 @@ def causal_top1_over_points(
     for i in range(1, len(pts)):
         t0, t1 = pts[i - 1], pts[i]
         d = vals[t1].v_hat - vals[t0].v_hat
-        # 段效应归到段末点 t1（该段最后执行的步）
+        # attribute the segment effect to the segment's end point t1 (the last step executed in it)
         a, b = R.action_bucket(st[t1 - 1], inst.repo)
-        # 持久化每个估值点的 m 次原始 recall（V4 诊断的数据缺口修复）：
-        # 只存 delta 会导致 U^exec 只能由 v̂ 反推 Bernoulli 方差，而 recall 是
-        # [0,1] 连续值，反推失真 —— 实测推导值被 v̂ 粗粒度锁死，真方差却是细粒度。
+        # persist the m raw recalls of each estimation point (fixes the data gap found by the
+        # V4 diagnostic): storing only delta would force U^exec to be back-derived from v̂ as a
+        # Bernoulli variance, but recall is a continuous value in [0,1], so the back-derivation
+        # distorts it -- in practice the derived value is locked to v̂'s coarse granularity while
+        # the true variance is fine-grained.
         seg.append({"t": t1, "seg_from": t0, "delta": round(d, 4),
                     "action": f"{a}#{b}", "pos": round(t1 / len(st), 4),
                     "v_t": round(vals[t1].v_hat, 4),
@@ -79,7 +85,7 @@ def causal_top1_over_points(
                     "ys_prev": [round(y, 4) for y in vals[t0].ys]})
     if not seg:
         return {"top1_step": None}
-    top1 = min(seg, key=lambda s: s["delta"])       # 最伤结果的段
+    top1 = min(seg, key=lambda s: s["delta"])       # the segment that hurt the outcome most
     return {"top1_step": top1["t"], "top1_pos": top1["pos"],
             "top1_delta": top1["delta"], "segments": seg,
             "v0": round(vals[0].v_hat, 4),
@@ -89,22 +95,22 @@ def causal_top1_over_points(
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runs-dir", required=True, help="runner 输出目录（含 results.jsonl 与 rollouts/）")
+    ap.add_argument("--runs-dir", required=True, help="runner output directory (containing results.jsonl and rollouts/)")
     ap.add_argument("--model", default="gpt-5.5-0424-global")
     ap.add_argument("--model-provider", default="idealab")
     ap.add_argument("--codex-bin", default="codex")
-    ap.add_argument("--m", type=int, default=4, help="fork-resample 次数")
-    ap.add_argument("--window-points", type=int, default=6, help="等距估值点数")
-    ap.add_argument("--only-failed", action="store_true", help="只对 Y=0 的 run 归因")
+    ap.add_argument("--m", type=int, default=4, help="number of fork-resamples")
+    ap.add_argument("--window-points", type=int, default=6, help="number of equidistant estimation points")
+    ap.add_argument("--only-failed", action="store_true", help="attribute only runs with Y=0")
     ap.add_argument("--per-file", action="store_true",
-                    help="per-file 召回归因：对被漏 gold 文件估 v_t^(f)（DESIGN §4.1.1）")
+                    help="per-file recall attribution: estimate v_t^(f) for the missed gold file (DESIGN §4.1.1)")
     ap.add_argument("--multifile-only", action="store_true",
-                    help="只跑多文件任务（gold>=2）——单文件任务实测 100% 无信号")
+                    help="run only multi-file tasks (gold>=2) -- single-file tasks measured 100% signal-free")
     ap.add_argument("--outcome", choices=["binary", "per_file", "recall"], default="per_file",
-                    help="结果变量：binary=任务级Y；per_file=单个gold文件命中；"
-                         "recall=连续召回率（修 Δ≡0 退化，推荐）")
+                    help="outcome variable: binary=task-level Y; per_file=hit on a single gold file; "
+                         "recall=continuous recall (fixes the Δ≡0 degeneracy, recommended)")
     ap.add_argument("--prefix-frac", type=float, default=0.6,
-                    help="prefix-only judge 的截断比例（固定值，避免依赖 causal 结果的构造性偏差）")
+                    help="truncation fraction for the prefix-only judge (a fixed value, to avoid a constructive bias from depending on the causal result)")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--out", default=None)
     ap.add_argument("--turn-timeout", type=float, default=600.0)
@@ -142,13 +148,14 @@ def main() -> int:
                 st = R.steps(base_items)
                 if len(st) < 3:
                     continue
-                # per-file 归因目标：优先被漏的 gold 文件（最强负向信号），
-                # 其次多文件任务的首个 gold；单文件任务退回任务级二元 Y。
+                # per-file attribution target: prefer the missed gold file (strongest negative
+                # signal), else the first gold of a multi-file task; single-file tasks fall back
+                # to the task-level binary Y.
                 pred = frozenset(r["answer"]) if r.get("answer") else None
                 missed = T.missed_files(pred, inst.gold)
                 target_file = None
                 if args.outcome == "recall":
-                    # 连续结果变量，修 Δ≡0 退化（实测 50% 的 per-file case 失效）
+                    # continuous outcome variable, fixes the Δ≡0 degeneracy (50% of per-file cases measured as degenerate)
                     target_file = "__recall__"
                 elif args.per_file:
                     if missed:
@@ -171,7 +178,7 @@ def main() -> int:
                     rec["causal_top1_pos"] = caus.get("top1_pos")
                     rec["causal_top1_delta"] = caus.get("top1_delta")
                     rec["causal_v0"] = caus.get("v0")
-                    # 退化检测：Δ 全为 0 ⇒ 归因无法区分任何步骤（须如实统计，不可隐藏）
+                    # degeneracy check: all Δ are 0 ⇒ attribution cannot distinguish any step (must be reported honestly, not hidden)
                     segs = caus.get("segments", [])
                     rec["causal_segments"] = segs
                     rec["degenerate"] = bool(segs) and all(
@@ -184,9 +191,10 @@ def main() -> int:
                         rec["judge_full_top1_step"] = jf["top1_step"]
                         rec["judge_full_top1_pos"] = jf["top1_pos"]
 
-                    # prefix-only：截断到**固定比例**（不依赖 causal 结果）。
-                    # ⚠️ 曾用"截到 causal top1 之前"，那会人为压低 prefix judge 的可选步位，
-                    # 制造"full 晚于 prefix"的假象 —— 构造性偏差，已修（PREREGISTRATION §3）。
+                    # prefix-only: truncate at a **fixed fraction** (independent of the causal result).
+                    # ⚠️ We used to cut "just before the causal top1", which artificially lowered the
+                    # step positions available to the prefix judge, manufacturing the artifact that
+                    # "full is later than prefix" -- a constructive bias, now fixed (PREREGISTRATION §3).
                     upto = max(2, int(round(len(st) * args.prefix_frac)))
                     jp = J.judge_attribution(srv, base_items, inst, r["Y"],
                                              args.model, args.model_provider,
@@ -206,8 +214,8 @@ def main() -> int:
                       f"judge_top1={rec.get('judge_full_top1_step')}", flush=True)
     finally:
         srv.close()
-    print(f"\n完成 {n} 条归因，用时 {(time.time()-t0)/60:.1f}min → {out_path}")
-    print(f"下一步: python -m pilot.analyze.attribution_compare --attr {out_path}")
+    print(f"\ncompleted {n} attributions in {(time.time()-t0)/60:.1f}min → {out_path}")
+    print(f"next: python -m pilot.analyze.attribution_compare --attr {out_path}")
     return 0
 
 

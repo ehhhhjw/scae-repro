@@ -1,13 +1,14 @@
-"""full-trace LLM-as-judge 归因 —— C3 中被攻击的基线（复现主流实践）。
+"""full-trace LLM-as-judge attribution -- the baseline attacked in C3 (reproducing mainstream practice).
 
-judge 看到**完整轨迹（动作+观测）+ 最终结果**，被要求指出 top-3 根因步。
-这正是我们要证明其有碰撞偏差的对象：它条件化了后继步骤与结果（$A_t$ 的后代），
-理论预测其归因会系统性偏向靠后步骤（§3.5）。
+The judge sees the **full trace (actions + observations) + the final outcome** and is asked to name the
+top-3 root-cause steps. This is exactly the object we want to show has collider bias: it conditions on
+the subsequent steps and the outcome (descendants of $A_t$), and theory predicts its attribution will
+systematically skew towards later steps (§3.5).
 
-另设 prefix-only judge（只给前缀、不给后继与结果）作为隔离对照：
-若 full-trace judge 的步位显著晚于 prefix-only judge，碰撞偏差就被单独摘出来了。
+A prefix-only judge (given only the prefix, without successors or outcome) is added as an isolating control:
+if the full-trace judge's step position is significantly later than the prefix-only judge's, collider bias has been singled out.
 
-judge 走同一个 idealab chat/responses 端点，用一次性 turn 完成（不需要工具）。
+The judge goes through the same idealab chat/responses endpoint, done in a one-shot turn (no tools needed).
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ _JSON_RE = re.compile(r"\{[^{}]*\"top1_step\"[^{}]*\}", re.DOTALL)
 
 
 def render_trace(steps: list, max_out_chars: int = 400, upto: int | None = None) -> str:
-    """把步骤序列渲染成 judge 可读的文本。upto=只渲染前 N 步（prefix-only 用）。"""
+    """Render the step sequence as judge-readable text. upto=render only the first N steps (for prefix-only)."""
     lines = []
     seq = steps[:upto] if upto else steps
     for s in seq:
@@ -85,7 +86,7 @@ def judge_attribution(
     prefix_upto: int | None = None,
     turn_timeout: float = 300.0,
 ) -> dict | None:
-    """让 judge 对一条 trace 做根因归因。mode=prefix 时只给前 prefix_upto 步、不给结果。"""
+    """Have the judge do root-cause attribution on one trace. With mode=prefix only the first prefix_upto steps are given, without the outcome."""
     steps = R.steps(base_items)
     n = len(steps)
     if n == 0:
@@ -108,7 +109,7 @@ def judge_attribution(
         f"Which step was most responsible? Respond with the JSON object."
     )
 
-    # judge 不需要工具/仓库，用一次性 thread 完成
+    # the judge needs no tools/repository, done with a one-shot thread
     started = srv.thread_start(
         cwd=inst.repo, model=model, model_provider=provider,
         sandbox="read-only", approval_policy="never",

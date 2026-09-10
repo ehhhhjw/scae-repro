@@ -1,29 +1,33 @@
-"""Next-step 动作预测 —— 补齐"对 Next Step 进行概率计算"这一目标。
+"""Next-step action prediction -- completing the "compute probabilities over the Next Step" goal.
 
-任务
+Task
 ----
-给定前缀 tau_{1:t}，预测下一动作 A_{t+1} 的等价类 (tool, target node in G)。
-这是 policy pi(.|tau_{1:t}) 的可评估代理：RQ1 只测了该分布的**熵**（overlap 诊断），
-这里补上它的**可预测性**，两者共同刻画执行过程的策略不确定性。
+Given the prefix tau_{1:t}, predict the equivalence class (tool, target node in G) of the
+next action A_{t+1}. This is an evaluable proxy for the policy pi(.|tau_{1:t}): RQ1 only
+measured that distribution's **entropy** (the overlap diagnostic); here we add its
+**predictability**, and together the two characterize the policy uncertainty of the
+execution process.
 
-候选集构造（不泄漏 gold）
-------------------------
-对每个决策点，候选 = 该 episode 已出现过的动作桶
-              ∪ 该 repo 语料中的高频动作桶（top-K，从**训练折**统计）
-标签在候选集内时才计入（覆盖率单独报告），否则任何模型都不可能命中。
+Candidate set construction (no gold leakage)
+--------------------------------------------
+For each decision point, candidates = action buckets already seen in this episode
+              ∪ high-frequency action buckets from this repo's corpus (top-K, counted on
+                the **training folds**)
+A decision point counts only when the label is inside the candidate set (coverage is
+reported separately); otherwise no model could possibly hit it.
 
-打分特征（全部只依赖 tau_{1:t} 与语料统计）
------------------------------------------
-  f1 该候选在训练折的全局频率（log）
-  f2 该候选在同 repo 训练折的频率（log）
-  f3 是否在当前 episode 已出现过
-  f4 与上一步同工具
-  f5 与上一步同目录
-  f6 距上次使用该候选的步距（log，越近越可能重复）
-  f7 该候选是否为上一步动作本身（自重复）
+Scoring features (all depend only on tau_{1:t} and corpus statistics)
+---------------------------------------------------------------------
+  f1 global frequency of the candidate on the training folds (log)
+  f2 frequency of the candidate on the same-repo training folds (log)
+  f3 whether it already appeared in the current episode
+  f4 same tool as the previous step
+  f5 same directory as the previous step
+  f6 step distance since the candidate was last used (log; closer = more likely repeated)
+  f7 whether the candidate is the previous action itself (self-repeat)
 
-评估：leave-one-repository-out，指标 top-1 / top-3 accuracy 与 MRR。
-基线：(a) 边际频率（只用 f1）(b) 重复上一步 (c) 随机。
+Evaluation: leave-one-repository-out, metrics top-1 / top-3 accuracy and MRR.
+Baselines: (a) marginal frequency (f1 only) (b) repeat the previous step (c) random.
 """
 
 from __future__ import annotations
@@ -104,7 +108,7 @@ def featurize(cand: str, prefix: list[str], gfreq: Counter, rfreq: Counter,
 
 
 def build_pairs(eps: list[dict], topk_repo: int = 40) -> dict:
-    """构造 (决策点, 候选集, 标签) 三元组，按 repo 分组以便 LORO。"""
+    """Build (decision point, candidate set, label) triples, grouped by repo for LORO."""
     by_repo: dict[str, list[dict]] = defaultdict(list)
     for e in eps:
         by_repo[e["project"]].append(e)
@@ -125,16 +129,16 @@ def evaluate_loro(by_repo: dict, topk_repo: int = 40, l2: float = 2.0) -> dict:
         if len(train_eps) < 20 or not test_eps:
             continue
 
-        # 训练折的语料统计（严禁用测试折）
+        # corpus statistics from the training folds (using the test fold is strictly forbidden)
         gfreq = Counter(b for e in train_eps for b in e["seq"])
         n_g = sum(gfreq.values())
         rfreq_by = defaultdict(Counter)
         for e in train_eps:
             rfreq_by[e["project"]].update(e["seq"])
-        # held-out repo 没有自身训练统计，用全局 top-K 作为候选补充
+        # the held-out repo has no statistics of its own, so use the global top-K as candidates
         global_top = [b for b, _ in gfreq.most_common(topk_repo)]
 
-        # --- 训练打分模型：正样本=真实下一步，负样本=同候选集其余 ---
+        # --- train the scoring model: positive = the true next step, negatives = the rest of the candidate set ---
         X, y = [], []
         for e in train_eps:
             seq = e["seq"]
@@ -152,7 +156,7 @@ def evaluate_loro(by_repo: dict, topk_repo: int = 40, l2: float = 2.0) -> dict:
             continue
         m = P.BayesianLogisticLaplace(l2=l2).fit(np.array(X), np.array(y))
 
-        # --- 测试 ---
+        # --- test ---
         r_tot = r_h1 = r_h3 = 0
         for e in test_eps:
             seq = e["seq"]
@@ -184,7 +188,7 @@ def evaluate_loro(by_repo: dict, topk_repo: int = 40, l2: float = 2.0) -> dict:
                               "top3": round(r_h3 / r_tot, 4)}
 
     if not tot:
-        return {"note": "无有效决策点"}
+        return {"note": "no valid decision points"}
     return {
         "n_decision_points": tot,
         "candidate_coverage": round(cov_num / cov_den, 4) if cov_den else None,
@@ -197,10 +201,11 @@ def evaluate_loro(by_repo: dict, topk_repo: int = 40, l2: float = 2.0) -> dict:
 
 
 def coarsen(bucket: str) -> str:
-    """粗粒度动作类：跨 repo 可迁移的结构特征，不含具体路径。
+    """Coarse action class: structural features that transfer across repos, without concrete paths.
 
-    LORO 下精确桶（含文件路径）不可迁移——路径在别的 repo 不存在。
-    这里保留 (工具, 是否测试文件, 目录深度档, 是否有具体目标) 四个可迁移维度。
+    Under LORO the exact bucket (which includes the file path) does not transfer -- the path
+    does not exist in another repo. Here we keep four transferable dimensions:
+    (tool, is-test-file, directory-depth bin, has-concrete-target).
     """
     tool = _toolof(bucket)
     tgt = bucket.split("#", 1)[1] if "#" in bucket else ""
@@ -213,10 +218,10 @@ def coarsen(bucket: str) -> str:
 
 
 def evaluate_within_repo(by_repo: dict, topk: int = 40, l2: float = 2.0) -> dict:
-    """同 repo 内 leave-one-episode-out —— next-step 预测的正确评估设置。
+    """Within-repo leave-one-episode-out -- the correct evaluation setting for next-step prediction.
 
-    实际用途是"在这个仓库里预测 agent 下一步"，不需要跨仓库迁移，
-    因此泛化单元是 episode 而非 repo。
+    The actual use case is "predict the agent's next step inside this repository", which
+    needs no cross-repository transfer, so the unit of generalization is the episode, not the repo.
     """
     tot = hit1 = hit3 = 0
     rr = 0.0
@@ -267,7 +272,7 @@ def evaluate_within_repo(by_repo: dict, topk: int = 40, l2: float = 2.0) -> dict
                 if prefix[-1] == label:
                     base["repeat_prev"] += 1
     if not tot:
-        return {"note": "无有效决策点"}
+        return {"note": "no valid decision points"}
     return {
         "setting": "within-repo, leave-one-episode-out",
         "n_decision_points": tot,
@@ -284,31 +289,31 @@ def main() -> int:
     ap.add_argument("--runs-root", default="pilot/runs/full_locate")
     ap.add_argument("--topk-repo", type=int, default=40)
     ap.add_argument("--coarse", action="store_true",
-                    help="用粗粒度动作类（跨 repo 可迁移）")
+                    help="use coarse action classes (transferable across repos)")
     ap.add_argument("--within-repo", action="store_true",
-                    help="同 repo 内 leave-one-episode-out（正确设置）")
+                    help="within-repo leave-one-episode-out (the correct setting)")
     ap.add_argument("--out", default="pilot/runs/nextstep.json")
     args = ap.parse_args()
 
     eps = load_episodes(Path(args.results), Path(args.runs_root))
-    print(f"载入 {len(eps)} episode，"
-          f"共 {sum(len(e['seq'])-1 for e in eps)} 个步转移")
+    print(f"loaded {len(eps)} episodes, "
+          f"{sum(len(e['seq'])-1 for e in eps)} step transitions in total")
     if args.coarse:
         for e in eps:
             e["seq"] = [coarsen(b) for b in e["seq"]]
-        print("已粗粒度化动作类（跨 repo 可迁移）")
+        print("action classes coarsened (transferable across repos)")
     by_repo = build_pairs(eps, args.topk_repo)
-    print(f"repo 数: {len(by_repo)}")
+    print(f"repos: {len(by_repo)}")
     res = (evaluate_within_repo(by_repo, args.topk_repo) if args.within_repo
            else evaluate_loro(by_repo, args.topk_repo))
     res["n_episodes"] = len(eps)
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
-    print("\n=== Next-step 预测（leave-one-repository-out）===")
-    print(f"  决策点 {res.get('n_decision_points')}  "
-          f"候选覆盖率 {res.get('candidate_coverage')}")
+    print("\n=== Next-step prediction (leave-one-repository-out) ===")
+    print(f"  decision points {res.get('n_decision_points')}  "
+          f"candidate coverage {res.get('candidate_coverage')}")
     print(f"  top-1 {res.get('top1')}  top-3 {res.get('top3')}  MRR {res.get('MRR')}")
-    print(f"  基线 top-1: {res.get('baselines_top1')}")
+    print(f"  baseline top-1: {res.get('baselines_top1')}")
     print(f"\n→ {args.out}")
     return 0
 

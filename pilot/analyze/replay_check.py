@@ -1,17 +1,17 @@
-"""A3 重放一致性检验 —— 零 API 成本，为论文的假设 A3 提供实证支撑。
+"""A3 replay consistency test -- zero API cost, provides empirical support for the paper's assumption A3.
 
-论文 Method §Identification 声称 A3（环境可重放）由构造保证：工具输出全序排序、
-截断位置固定、locale/TZ/终端宽度/hash seed 全部钉死。这是**可检验的断言**，
-不应只作声明。
+The paper's Method §Identification claims A3 (environment replayability) holds by construction: tool outputs
+are totally ordered, truncation positions fixed, locale/TZ/terminal width/hash seed all pinned. This is a
+**testable assertion**, and should not be left as a mere declaration.
 
-做法：从已有 rollout 中取出真实执行过的只读动作，在同一仓库（reset 到 base_commit）
-重复执行 R 次，检查输出是否逐字节一致。
+Method: take read-only actions that were actually executed in existing rollouts, re-run them R times in the
+same repository (reset to base_commit), and check whether the outputs are byte-identical.
 
 report:
-  - consistency_rate: 逐字节一致的动作占比
-  - 不一致的动作及其差异来源（用于定位残余非确定性）
+  - consistency_rate: fraction of actions that are byte-identical
+  - the inconsistent actions and the source of their divergence (used to localize residual nondeterminism)
 
-这直接对应论文里应报告的 "A3 replay consistency rate"。
+This maps directly onto the "A3 replay consistency rate" that the paper should report.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from pilot.probes import task as T                          # noqa: E402
 
 
 def extract_shell_cmd(step) -> str | None:
-    """从 step 的参数里取出 shell 命令（codex 的 exec_command 工具）。"""
+    """Pull the shell command out of a step's args (codex's exec_command tool)."""
     a = step.args
     cmd = a.get("cmd") or a.get("command")
     if isinstance(cmd, list):
@@ -42,7 +42,7 @@ def extract_shell_cmd(step) -> str | None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--rollouts", nargs="+", required=True,
-                    help="rollout jsonl 路径（可用 glob 展开）")
+                    help="rollout jsonl paths (glob-expandable)")
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--max-actions", type=int, default=120)
     ap.add_argument("--out", default="pilot/runs/replay_check.json")
@@ -59,7 +59,7 @@ def main() -> int:
         p = Path(rp)
         if not p.exists():
             continue
-        # rollout 文件名形如 <instance_id>__k0.jsonl
+        # rollout filenames look like <instance_id>__k0.jsonl
         iid = p.stem.split("__k")[0]
         inst = insts.get(iid)
         if inst is None or not inst.repo.is_dir():
@@ -100,21 +100,21 @@ def main() -> int:
         "n_mismatch": len(mismatches),
         "mismatches": mismatches[:20],
         "interpretation": (
-            "A3 在检验范围内成立（100% 逐字节一致）"
+            "A3 holds within the tested scope (100% byte-identical)"
             if rate == 1.0 else
-            f"A3 存在残余非确定性：{len(mismatches)} 个动作输出不稳定，需定位并钉死"
-            if rate is not None else "无可检验动作"),
+            f"A3 has residual nondeterminism: {len(mismatches)} actions produce unstable output, must be localized and pinned"
+            if rate is not None else "no testable actions"),
     }
     Path(args.out).write_text(json.dumps(report, ensure_ascii=False, indent=2),
                               encoding="utf-8")
-    print("=== A3 重放一致性检验 ===")
-    print(f"  检验动作数 {checked}（每个重复 {args.repeats} 次）")
-    print(f"  逐字节一致 {consistent} → 一致率 {report['consistency_rate']}")
-    print(f"  跳过非只读 {skipped_nonreadonly}")
-    print(f"  不一致 {len(mismatches)}")
+    print("=== A3 replay consistency test ===")
+    print(f"  actions checked {checked} (each repeated {args.repeats} times)")
+    print(f"  byte-identical {consistent} → consistency rate {report['consistency_rate']}")
+    print(f"  skipped non-read-only {skipped_nonreadonly}")
+    print(f"  inconsistent {len(mismatches)}")
     for m in mismatches[:5]:
-        print(f"    {m['instance']} step{m['step']}: {m['cmd'][:80]} ({m['n_distinct']} 种输出)")
-    print(f"  结论: {report['interpretation']}")
+        print(f"    {m['instance']} step{m['step']}: {m['cmd'][:80]} ({m['n_distinct']} distinct outputs)")
+    print(f"  conclusion: {report['interpretation']}")
     print(f"\n→ {args.out}")
     return 0
 

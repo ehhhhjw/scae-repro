@@ -1,41 +1,41 @@
-"""X3（API，最高优先）溯源掩蔽干预：把 A3 因果化。
+"""X3 (API, highest priority) provenance-mask intervention: making A3 causal.
 
-命题
-----
-Agent 走向"刚在输出里看到的路径"这一溯源边是**因果的**：
-掩蔽它会降低 recall。
+Claim
+-----
+The provenance edge by which the agent moves to "the path it just saw in the output" is
+**causal**: masking it lowers recall.
 
-被估量（路径特异效应，path-specific effect）
+Estimand (path-specific effect)
+-------------------------------
+PSE(t*) = E[Y|τ_{1:t*}] - E[Y|τ_{1:t*}, do(gold paths in output_{t*} are masked)]
+
+Three-arm design (paired within instance)
 -----------------------------------------
-PSE(t*) = E[Y|τ_{1:t*}] - E[Y|τ_{1:t*}, do(output_{t*} 中 gold 路径被掩蔽)]
+  C control : output unchanged (the standard estimate of v_t*)
+  M mask    : drop the output lines that mention gold (do(observation))
+  P placebo : drop the same number of non-gold lines (internal validity check)
 
-三臂设计（instance 内配对）
---------------------------
-  C 对照  : 输出不改（v_t* 的标准估计）
-  M 掩蔽  : 删掉输出中提到 gold 的行（do(observation)）
-  P 安慰剂: 删掉等量的非 gold 行（内部效度检查）
+Fork point t* = the first_gold step (the step that first lets gold enter the agent's observation history)
+  - 71 candidate instances, median first_gold_t = 2 (step index, not a fraction)
+  - m=8 forks per arm × ~2.5min = 20min/instance; 6 in parallel → ~8.3h total
 
-Fork 点 t* = first_gold 步（首次让 gold 进入 agent 观测史的步）
-  - 71 个候选 instance，median first_gold_t = 2（步序号，非比例）
-  - 每臂 m=8 forks × ~2.5min = 20min/instance；6 并行 → ~8.3h 总计
+Three-way criterion
+-------------------
+(i)  M ≪ C and P ≈ C → the provenance edge is causally effective; main result of the paper
+(ii) M ≈ C and P ≈ C → information redundancy; run dose-response (mask k=1..K gold lines)
+(iii)P drops too     → operator disturbance; fix mask_output_lines and rerun
 
-三档判据
---------
-(i)  M ≪ C 且 P ≈ C → 溯源边因果有效；论文主结论
-(ii) M ≈ C 且 P ≈ C → 信息冗余；做剂量–反应（掩蔽 k=1..K 条 gold）
-(iii)P 也下降      → 算子扰动；修 mask_output_lines 再重跑
-
-使用方法
---------
-  # 生成干预清单（零 API）
+Usage
+-----
+  # generate the intervention plan (zero API)
   python3 -m pilot.analyze.x3_prov_mask --mode plan --out pilot/runs/x3_plan.json
 
-  # 运行干预（API，~8.3h）
+  # run the intervention (API, ~8.3h)
   python3 -m pilot.analyze.x3_prov_mask --mode run \
       --plan pilot/runs/x3_plan.json \
       --out pilot/runs/x3_pse.json
 
-  # 分析结果（零 API）
+  # analyze the results (zero API)
   python3 -m pilot.analyze.x3_prov_mask --mode analyze \
       --out pilot/runs/x3_pse.json
 """
@@ -63,20 +63,20 @@ from pilot.analyze.v3k_trace_causal import gold_relation, boot_ci, paired_ci  # 
 from pilot.analyze.v3j_trace_graph import PATH_RE                # noqa: E402
 
 SEED = 20260814
-M_FORKS = 8          # fork 次数（每臂）
-N_BOOT = 4000        # bootstrap 次数
+M_FORKS = 8          # forks per arm
+N_BOOT = 4000        # bootstrap resamples
 
 
 def _candidate_instances(
     runs_root: str,
     runs_root2: str | None = None,
 ) -> list[dict]:
-    """找到有 first_gold 步的多文件 instance 及其 first_gold_t。
+    """Find multi-file instances that have a first_gold step, plus their first_gold_t.
 
-    返回列表：[{"instance_id", "rollout_path", "first_gold_t", "n_gold", "gold", "n_steps"}]
+    Returns a list: [{"instance_id", "rollout_path", "first_gold_t", "n_gold", "gold", "n_steps"}]
     """
     insts = {i.instance_id: i for i in T.load_instances()}
-    # 收集 rollout 路径（优先 full_locate，再找 v4prime）
+    # collect rollout paths (full_locate first, then v4prime)
     roll_map: dict[str, Path] = {}
     for root in ([runs_root] + ([runs_root2] if runs_root2 else [])):
         for p in Path(root).glob("shard*/rollouts/*.jsonl"):
@@ -116,12 +116,12 @@ def _candidate_instances(
 
 
 def plan_mode(args: argparse.Namespace) -> int:
-    """生成干预清单（零 API）。"""
-    print("计算 first_gold 候选清单...")
+    """Generate the intervention plan (zero API)."""
+    print("computing the first_gold candidate list...")
     cands = _candidate_instances(args.runs_root, args.runs_root2)
-    print(f"候选 instance: {len(cands)}")
+    print(f"candidate instances: {len(cands)}")
 
-    # 统计
+    # stats
     fg_ts = [c["first_gold_t"] for c in cands]
     fg_ratios = [c["first_gold_t"] / c["n_steps"] for c in cands]
     within_5 = sum(1 for t in fg_ts if t <= 5)
@@ -151,12 +151,12 @@ def plan_mode(args: argparse.Namespace) -> int:
     Path(args.out).write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    print(f"\n=== X3 干预清单 ===")
-    print(f"候选 instance: {len(cands)}")
-    print(f"first_gold_t 中位数: {statistics.median(fg_ts):.0f}")
+    print(f"\n=== X3 intervention plan ===")
+    print(f"candidate instances: {len(cands)}")
+    print(f"first_gold_t median: {statistics.median(fg_ts):.0f}")
     print(f"first_gold_t ≤5: {within_5}/{len(cands)} = {within_5/max(1,len(cands))*100:.0f}%")
-    print(f"预估预算: {len(cands)*3*M_FORKS} forks, "
-          f"≈{len(cands)*3*M_FORKS*2.5/60/6:.1f}h (6 并行)")
+    print(f"estimated budget: {len(cands)*3*M_FORKS} forks, "
+          f"≈{len(cands)*3*M_FORKS*2.5/60/6:.1f}h (6 in parallel)")
     print(f"\n→ {args.out}")
     return 0
 
@@ -174,11 +174,11 @@ def _estimate_arm(
     m: int,
     turn_timeout: float,
 ) -> dict:
-    """给定前缀到 t_star（含），按臂修改输出，估计 v_{t*}。
+    """Given the prefix through t_star (inclusive), modify the output per arm and estimate v_{t*}.
 
-    control : 原始前缀 (truncate_including_step(t_star))
-    mask    : 掩蔽 gold 行
-    placebo : 掩蔽等量非 gold 行（行数 = gold 行数，从非 gold 行随机采样）
+    control : original prefix (truncate_including_step(t_star))
+    mask    : mask the gold lines
+    placebo : mask the same number of non-gold lines (line count = gold line count, sampled at random from non-gold lines)
     """
     prefix = R.truncate_including_step(base_items, t_star)
     R.assert_no_dangling_calls(prefix)
@@ -190,7 +190,7 @@ def _estimate_arm(
         except ValueError as e:
             return {"error": str(e), "arm": arm}
     elif arm == "placebo":
-        # 先数 gold 行数
+        # first count the gold lines
         n_gold_lines = R.count_output_lines_matching(base_items, t_star, gold_paths)
         if n_gold_lines == 0:
             return {"error": "no gold lines to match for placebo", "arm": arm}
@@ -201,14 +201,15 @@ def _estimate_arm(
         all_lines = txt.split("\n")
         non_gold = [ln for ln in all_lines
                     if not any(gp in ln for gp in gold_paths) and ln.strip()]
-        # 修 ①：安慰剂应移除**同样含路径**的非 gold 行，否则它删掉的是
-        # `Chunk ID:` / `Output:` 这类无信息头部行，信息量远小于掩蔽臂，
-        # 不构成公平对照（"扰动等量、信息不同"才是安慰剂的本意）。
+        # Fix 1: the placebo should remove non-gold lines that **also contain paths**, otherwise
+        # what it drops are uninformative header lines like `Chunk ID:` / `Output:`, carrying far
+        # less information than the mask arm and thus not a fair control ("same amount of
+        # perturbation, different information" is the whole point of a placebo).
         pathy = [ln for ln in non_gold if PATH_RE.search(ln)]
         pool = pathy if len(pathy) >= n_gold_lines else (
             pathy + [ln for ln in non_gold if ln not in pathy])
-        # 修 ②：`hash()` 受 PYTHONHASHSEED 随机化，跨进程不稳定 → 不可复现。
-        # 改用字符串种子（random.Random 接受 str，确定性），同时做 per-instance 播种。
+        # Fix 2: `hash()` is randomized by PYTHONHASHSEED and unstable across processes → not reproducible.
+        # Use a string seed instead (random.Random accepts str, deterministic), seeded per instance.
         rng = random.Random(f"{SEED}:{inst.instance_id}")
         rng.shuffle(pool)
         placebo_targets = pool[:n_gold_lines]
@@ -220,19 +221,20 @@ def _estimate_arm(
             )
         except ValueError as e:
             return {"error": str(e), "arm": arm}
-        # 修 ③：显式记录配平情况。行数不足时不静默通过 —— 主分析只用配平样本，
-        # 未配平样本单独报告（它们仍可喂剂量–反应分析）。
+        # Fix 3: record the balancing explicitly. Do not silently pass when there are too few
+        # lines -- the main analysis uses only balanced samples, and unbalanced ones are
+        # reported separately (they can still feed the dose-response analysis).
         diag["n_gold_lines_target"] = n_gold_lines
         diag["n_pathy_available"] = len(pathy)
         diag["balanced"] = bool(diag.get("n_lines_dropped") == n_gold_lines)
         diag["placebo_all_pathy"] = bool(len(pathy) >= n_gold_lines)
 
-    # 写前缀
+    # write the prefix
     workdir.mkdir(parents=True, exist_ok=True)
     fork_file = workdir / f"prefix_t{t_star}_{arm}.jsonl"
     R.dump(prefix, fork_file)
 
-    # m 次 fork
+    # m forks
     ys: list[float] = []
     errs: list[str] = []
     for i in range(m):
@@ -247,18 +249,20 @@ def _estimate_arm(
             )
             tid = fk["thread"]["id"]
             tr = srv.turn_run(tid, T.CONTINUE_PROMPT, timeout=turn_timeout)
-            # ⚠️ 关键护栏：turn 失败时 rollout 里没有 answer，`answer_from_rollout`
-            # 返回 None，而 `T.outcome(None, gold)["recall"] == 0.0` —— 于是
-            # **任何 API/环境失败都会静默变成"recall=0"并被当作有效观测**。
-            # 若失败间歇性地更多命中 mask 臂，就会**制造出虚假的正向 PSE**。
-            # 故必须先判定 turn 是否真成功，失败记 NaN（排除）而不是 0。
+            # ⚠️ Key guardrail: when a turn fails there is no answer in the rollout,
+            # `answer_from_rollout` returns None, and `T.outcome(None, gold)["recall"] == 0.0`
+            # -- so **any API/environment failure silently turns into "recall=0" and is treated
+            # as a valid observation**. If failures intermittently hit the mask arm more often,
+            # that **manufactures a spurious positive PSE**.
+            # So we must first decide whether the turn really succeeded; on failure record NaN
+            # (excluded) rather than 0.
             err_msgs = []
             for nt in (tr.get("notifications") or []):
                 if nt.get("method") == "error":
                     pr_ = nt.get("params") or {}
-                    # willRetry=true 是"正在重连"的瞬时通知，不是终态失败。
-                    # 只有 turn/completed.status=="failed" 才是终态（实测：
-                    # Reconnecting 1..5 之后仍可能成功）。
+                    # willRetry=true is a transient "reconnecting" notification, not a terminal failure.
+                    # Only turn/completed.status=="failed" is terminal (observed in practice:
+                    # it can still succeed after Reconnecting 1..5).
                     if pr_.get("willRetry"):
                         continue
                     err_msgs.append(str((pr_.get("error") or {}).get("message"))[:120])
@@ -273,8 +277,8 @@ def _estimate_arm(
             if not (pth and Path(pth).exists()):
                 ys.append(float("nan")); errs.append("NO_ROLLOUT_FILE"); continue
             items = R.load(pth)
-            # 续跑里连一条 assistant 消息都没有 ⇒ 无效（真 agent 总会说点什么），
-            # 而不是"答了但 recall=0"
+            # not a single assistant message in the continuation ⇒ invalid (a real agent always
+            # says something), rather than "answered but recall=0"
             has_assistant = any(
                 it.get("type") == "response_item"
                 and (it.get("payload") or {}).get("role") == "assistant"
@@ -284,7 +288,7 @@ def _estimate_arm(
                 ys.append(float("nan")); errs.append("NO_ASSISTANT_MESSAGE"); continue
             ys.append(T.outcome(ans, inst.gold)["recall"])
         except Exception as exc:
-            # 不静默：记录异常类型，便于区分"环境失败"与"真的 recall=0"
+            # not silent: record the exception type to distinguish "environment failure" from "a genuine recall=0"
             ys.append(float("nan"))
             errs.append(f"{type(exc).__name__}: {str(exc)[:120]}")
 
@@ -302,11 +306,11 @@ def _estimate_arm(
 
 
 def run_mode(args: argparse.Namespace) -> int:
-    """执行三臂干预（API，~8.3h）。"""
+    """Run the three-arm intervention (API, ~8.3h)."""
     plan = json.loads(Path(args.plan).read_text())
     candidates = plan["candidates"]
     if args.shard_count > 0 and args.shard_index >= 0:
-        # 按 project 轮转分片，保证各片仓库多样性与负载均衡（同 attr 的做法）
+        # round-robin the shards by project to keep repository diversity and load balance across shards (same as attr)
         by_proj = {}
         for c in candidates:
             by_proj.setdefault(c["instance_id"].split("__")[0], []).append(c)
@@ -318,10 +322,10 @@ def run_mode(args: argparse.Namespace) -> int:
                     ordered.append(pl.pop(0))
         candidates = [c for i, c in enumerate(ordered)
                       if i % args.shard_count == args.shard_index]
-        print(f"[shard {args.shard_index}/{args.shard_count}] 分到 {len(candidates)} 个 instance")
+        print(f"[shard {args.shard_index}/{args.shard_count}] assigned {len(candidates)} instances")
     if args.limit > 0:
         candidates = candidates[:args.limit]
-    print(f"将处理 {len(candidates)} 个 instance (limit={args.limit or 'none'})")
+    print(f"will process {len(candidates)} instances (limit={args.limit or 'none'})")
 
     out_path = Path(args.out)
     workroot = Path(args.workdir)
@@ -329,11 +333,12 @@ def run_mode(args: argparse.Namespace) -> int:
     codex_home = workroot / "codex_home"
     write_codex_config(codex_home, args.model)
 
-    # 前置检查：缺 API key 会让每个 fork 都失败，而失败曾被静默记为 recall=0
+    # pre-check: a missing API key makes every fork fail, and failures used to be silently recorded as recall=0
     import os
     if not os.environ.get("IDEALAB_API_KEY"):
-        print("❌ 环境变量 IDEALAB_API_KEY 未设置。X3 每个 fork 都会失败，"
-              "且失败曾被静默记为 recall=0（伪装成干预效应）。请先 export 后重跑。")
+        print("❌ Environment variable IDEALAB_API_KEY is not set. Every X3 fork will fail, "
+              "and failures used to be silently recorded as recall=0 (disguised as an "
+              "intervention effect). Export it first, then rerun.")
         return 2
 
     insts = {i.instance_id: i for i in T.load_instances()}
@@ -386,20 +391,21 @@ def run_mode(args: argparse.Namespace) -> int:
                            "trace": traceback.format_exc()[-300:]}
                 arms[arm] = res
             rec["arms"] = arms
-            # fail-fast：第一个 instance 若任一臂全部无效，说明环境/配置坏了，
-            # 立刻中止。否则 12h 后会得到一份全零数据，而它**看起来正好像
-            # 分支 (ii)「信息冗余」** —— 配置错误伪装成科学结论。
+            # fail-fast: if any arm of the first instance is entirely invalid, the
+            # environment/config is broken, so abort immediately. Otherwise 12h later we get
+            # all-zero data, and it **looks exactly like branch (ii) "information redundancy"**
+            # -- a misconfiguration disguised as a scientific conclusion.
             if n == 0:
                 bad = [a for a, r in arms.items() if not r.get("n_valid")]
                 if bad:
-                    print(f"❌ FAIL-FAST：首个 instance 的臂 {bad} 全部无效重放。")
+                    print(f"❌ FAIL-FAST: arms {bad} of the first instance replayed entirely invalid.")
                     for a in bad:
                         for e in (arms[a].get("errors") or [])[:3]:
                             print(f"     {a}: {e}")
-                    print("   已中止，未浪费预算。修好后重跑。")
+                    print("   Aborted, no budget wasted. Fix it and rerun.")
                     return 3
 
-            # 计算 PSE 和 placebo 效应
+            # compute PSE and the placebo effect
             c_v = arms.get("control", {}).get("v_hat", float("nan"))
             m_v = arms.get("mask", {}).get("v_hat", float("nan"))
             p_v = arms.get("placebo", {}).get("v_hat", float("nan"))
@@ -415,7 +421,7 @@ def run_mode(args: argparse.Namespace) -> int:
                   f"(control={rec['control_v']}, mask={rec['mask_v']}, placebo={rec['placebo_v']})",
                   flush=True)
 
-            # 追加写入（中间断点也可恢复）
+            # append-write (recoverable from an interruption partway through)
             with open(out_path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
@@ -423,34 +429,34 @@ def run_mode(args: argparse.Namespace) -> int:
         srv.close()
 
     elapsed = (time.time() - t0) / 60
-    print(f"\n完成 {n} 条 X3 干预，用时 {elapsed:.1f}min → {out_path}")
+    print(f"\ncompleted {n} X3 interventions in {elapsed:.1f}min → {out_path}")
     return 0
 
 
 def analyze_mode(args: argparse.Namespace) -> int:
-    """分析 X3 结果（零 API）。"""
+    """Analyze the X3 results (zero API)."""
     out_path = Path(args.out)
     if not out_path.exists():
-        print(f"⚠️ 结果文件不存在：{out_path}")
+        print(f"⚠️ result file does not exist: {out_path}")
         return 1
 
     recs = [json.loads(l) for l in out_path.read_text().splitlines() if l.strip()]
     if not recs:
-        print("⚠️ 没有记录")
+        print("⚠️ no records")
         return 1
 
-    print(f"分析 {len(recs)} 条 X3 结果")
+    print(f"analyzing {len(recs)} X3 results")
 
-    # PSE 和 placebo 效应
+    # PSE and the placebo effect
     pse_vals = [r["PSE"] for r in recs if r.get("PSE") is not None]
     plac_vals = [r["placebo_effect"] for r in recs if r.get("placebo_effect") is not None]
     control_vs = [r["control_v"] for r in recs if r.get("control_v") is not None]
     mask_vs = [r["mask_v"] for r in recs if r.get("mask_v") is not None]
 
-    pse_ci = boot_ci(pse_vals) if pse_vals else {"note": "无样本"}
-    plac_ci = boot_ci(plac_vals) if plac_vals else {"note": "无样本"}
+    pse_ci = boot_ci(pse_vals) if pse_vals else {"note": "no samples"}
+    plac_ci = boot_ci(plac_vals) if plac_vals else {"note": "no samples"}
 
-    # 配对比较（instance 内）
+    # paired comparison (within instance)
     pse_paired = paired_ci(
         [r["control_v"] for r in recs if r.get("control_v") is not None and r.get("mask_v") is not None],
         [r["mask_v"] for r in recs if r.get("control_v") is not None and r.get("mask_v") is not None],
@@ -460,21 +466,21 @@ def analyze_mode(args: argparse.Namespace) -> int:
         [r["placebo_v"] for r in recs if r.get("control_v") is not None and r.get("placebo_v") is not None],
     )
 
-    # 三档判据
+    # three-way criterion
     pse_sig = pse_paired.get("significant", False)
     plac_sig = plac_paired.get("significant", False)
     pse_dir = (pse_paired.get("diff", 0.0) or 0.0) > 0   # control > mask
 
     if pse_sig and not plac_sig and pse_dir:
-        verdict = "(i) STRONG_POSITIVE: 溯源边因果有效 M≪C 且 P≈C"
+        verdict = "(i) STRONG_POSITIVE: the provenance edge is causally effective, M≪C and P≈C"
     elif not pse_sig and not plac_sig:
-        verdict = "(ii) REDUNDANCY: 信息冗余 M≈C，建议剂量–反应实验"
+        verdict = "(ii) REDUNDANCY: information redundancy M≈C, a dose-response experiment is advised"
     elif plac_sig:
-        verdict = "(iii) OPERATOR_DISTURBANCE: P 也下降，修 mask 算子后重跑"
+        verdict = "(iii) OPERATOR_DISTURBANCE: P drops too, fix the mask operator and rerun"
     else:
-        verdict = "AMBIGUOUS: 仅部分条件满足，查看详细数字"
+        verdict = "AMBIGUOUS: only some conditions met, check the detailed numbers"
 
-    # 剂量–反应分层（按 n_gold）
+    # dose-response stratification (by n_gold)
     by_ngold: dict[int, list[float]] = {}
     for r in recs:
         ng = r.get("n_gold", 0)
@@ -500,12 +506,12 @@ def analyze_mode(args: argparse.Namespace) -> int:
                             / max(1, len(recs)), 3),
     }
 
-    # 写分析文件（追加后缀 _analysis.json）
+    # write the analysis file (append the suffix _analysis.json)
     ana_path = out_path.with_suffix("") .parent / (out_path.stem + "_analysis.json")
     ana_path.write_text(json.dumps(analysis, ensure_ascii=False, indent=2),
                         encoding="utf-8")
 
-    print(f"\n=== X3：溯源掩蔽干预分析 ===")
+    print(f"\n=== X3: provenance-mask intervention analysis ===")
     print(f"n={len(recs)}")
     if "note" not in pse_paired:
         pse_d = pse_paired.get("diff", "?")
@@ -516,8 +522,8 @@ def analyze_mode(args: argparse.Namespace) -> int:
         plac_d = plac_paired.get("diff", "?")
         plac_c = plac_paired.get("ci95", "?")
         sig_str = "SIGNIFICANT" if plac_sig else "n.s."
-        print(f"  安慰剂 (control-placebo): {plac_d:+.4f} CI{plac_c} [{sig_str}]")
-    print(f"\n判据: {verdict}")
+        print(f"  placebo (control-placebo): {plac_d:+.4f} CI{plac_c} [{sig_str}]")
+    print(f"\ncriterion: {verdict}")
     print(f"\n→ {ana_path}")
     return 0
 
@@ -526,13 +532,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["plan", "run", "analyze"], default="plan")
     ap.add_argument("--runs-root", default="pilot/runs/full_locate",
-                    help="第一个 rollout 来源（全量定位结果）")
+                    help="first rollout source (full localization results)")
     ap.add_argument("--runs-root2", default=None,
-                    help="第二个 rollout 来源（可选，补充覆盖）")
+                    help="second rollout source (optional, extra coverage)")
     ap.add_argument("--plan", default="pilot/runs/x3_plan.json",
-                    help="干预清单路径（plan 模式产出，run 模式读取）")
+                    help="intervention plan path (produced by plan mode, read by run mode)")
     ap.add_argument("--out", default="pilot/runs/x3_pse.json",
-                    help="run 模式的输出路径 / analyze 模式的读取路径")
+                    help="output path for run mode / input path for analyze mode")
     ap.add_argument("--workdir", default="pilot/runs/x3_work")
     ap.add_argument("--model", default="gpt-5.5-0424-global")
     ap.add_argument("--model-provider", default="idealab")
@@ -540,11 +546,11 @@ def main() -> int:
     ap.add_argument("--m", type=int, default=M_FORKS)
     ap.add_argument("--turn-timeout", type=float, default=900.0)
     ap.add_argument("--shard-index", type=int, default=-1,
-                    help="分片索引（0-based）。串行 1680 fork ≈70h，必须分片并行。")
+                    help="shard index (0-based). 1680 forks serially is ≈70h, so sharding in parallel is required.")
     ap.add_argument("--shard-count", type=int, default=0,
-                    help="分片总数。每片用独立 --workdir → 独立 CODEX_HOME+AppServer")
+                    help="total number of shards. Each shard uses its own --workdir → its own CODEX_HOME+AppServer")
     ap.add_argument("--limit", type=int, default=0,
-                    help="只跑前 N 个 instance（调试用，0=全部）")
+                    help="only run the first N instances (for debugging, 0=all)")
     args = ap.parse_args()
 
     if args.mode == "plan":

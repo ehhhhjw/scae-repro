@@ -1,22 +1,22 @@
-"""X_SYNTHESIS（零 API）：综合所有实验结果生成论文数字表。
+"""X_SYNTHESIS (zero API): synthesize all experimental results into the paper's number table.
 
-把 V3g/V3i/V3j/V3k/X1/X2/X7 + analysis.json 的全部已知数字
-统一到一个 synthesis.json，供论文宏定义使用。
+Collect every known number from V3g/V3i/V3j/V3k/X1/X2/X7 + analysis.json into a single
+synthesis.json for the paper's macro definitions.
 
-运行
-----
+Run
+---
   python3 -m pilot.analyze.x_synthesis --out pilot/runs/synthesis.json
 
-输出结构
---------
-  L1_layer  : 工具转移 + 溯源预测层
-  L2_layer  : anytime 价值函数 + 因果归因
-  L3_bridge : L1↔L2 关系（X4 依赖 V4'，此处填占位符）
-  UQ_decomp : U_task / U_policy / U_model 三分解
-  baselines : 定位基线（T1）
-  judge_mechanism : X2 结论
+Output structure
+----------------
+  L1_layer  : tool transition + provenance prediction layer
+  L2_layer  : anytime value function + causal attribution
+  L3_bridge : L1↔L2 relation (X4 depends on V4', placeholder here)
+  UQ_decomp : U_task / U_policy / U_model three-way decomposition
+  baselines : localization baseline (T1)
+  judge_mechanism : X2 conclusions
   fragile_success : X7 + process_uncertainty
-  X3_plan   : 干预计划摘要
+  X3_plan   : intervention plan summary
 """
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ def main() -> int:
     upol = _load("upolicy_t3.json")
     estim = _load("estimability.json")
 
-    # ── L1: 工具转移分量（来自 v3b_distribution） ──
+    # ── L1: tool transition component (from v3b_distribution) ──
     # Expected structure: {U_tool: {mean, median, eff_candidates}, top3_accuracy, ECE}
     l1_tool = {}
     if v3b:
@@ -80,7 +80,7 @@ def main() -> int:
             "H_tool_v0_spearman_sig": x1.get("H_tool_vs_v0_corr", {}).get("significant"),
         })
 
-    # ── L1: 溯源分量（来自 v3j） ──
+    # ── L1: provenance component (from v3j) ──
     l1_prov = {}
     if v3j:
         g1 = v3j.get("G1_predictors", {})
@@ -95,7 +95,7 @@ def main() -> int:
             "H_prov_eff": 3.46,
         }
 
-    # ── Regime split (来自 v3g) ──
+    # ── Regime split (from v3g) ──
     regime = {}
     if v3g:
         r_info = v3g.get("R", {})
@@ -109,7 +109,7 @@ def main() -> int:
             "regime_auroc": v3g.get("regime_auroc"),
         }
 
-    # ── Code graph (来自 v3i) ──
+    # ── Code graph (from v3i) ──
     graph = {}
     if v3i:
         graph = {
@@ -118,7 +118,7 @@ def main() -> int:
             "visited_cluster_lift": v3i.get("visited_cluster_lift"),
         }
 
-    # ── Joint L1 (来自 X1) ──
+    # ── Joint L1 (from X1) ──
     joint_l1 = {}
     if x1:
         jec = x1.get("joint_effective_candidates", {})
@@ -132,7 +132,7 @@ def main() -> int:
             "note": "H_tool + H_prov (independence assumption); eff=exp(H1)*exp(H2)",
         }
 
-    # ── L2: anytime value + attribution (来自 analysis.json) ──
+    # ── L2: anytime value + attribution (from analysis.json) ──
     t1 = analysis.get("T1_baseline", {})
     t4 = analysis.get("T4_attribution", {})
     l2 = {}
@@ -153,7 +153,7 @@ def main() -> int:
             "degenerate_rate": t4.get("degenerate_rate"),
         }
 
-    # ── Judge mechanism (来自 X2) ──
+    # ── Judge mechanism (from X2) ──
     judge = {}
     if x2:
         judge = {
@@ -180,7 +180,7 @@ def main() -> int:
             "mean_gold_steps_per_instance": 8.70,  # from X2 WITHIN_CLASS analysis
         }
 
-    # ── UQ decomposition (来自 upolicy_t3, estimability) ──
+    # ── UQ decomposition (from upolicy_t3, estimability) ──
     uq = {}
     if upol or estim:
         sc = estim.get("state_counts", {}) if estim else {}
@@ -210,10 +210,10 @@ def main() -> int:
                                         .get("rho"),
             "power_H_vs_nsteps_sig": x7.get("POWER_CHECK", {}).get("H_tool_vs_n_steps", {})
                                         .get("significant"),
-            "conclusion": "L1工具熵不是执行稳定性的代理（功效已确认）",
+            "conclusion": "L1 tool entropy is not a proxy for execution stability (power confirmed)",
         }
 
-    # ── X4/X5/X6: 状态（V4' 后填充）──
+    # ── X4/X5/X6: status (filled in after V4') ──
     x4_status = "PENDING_V4PRIME" if not x4 or x4.get("n_rows", 0) < 10 else "DONE"
     x5_status = "PENDING_V4PRIME" if not x5 or x5.get("n_tests", 0) < 10 else "DONE"
     x6_status = "PENDING_V4PRIME" if not x6 or x6.get("N_points_total", 0) < 10 else "DONE"
@@ -245,35 +245,35 @@ def main() -> int:
 
     # ── Paper claim inventory ──
     claims = [
-        {"id": "A1", "claim": "环境可重放（100/100 逐字节一致）",
+        {"id": "A1", "claim": "environment is replayable (100/100 byte-identical)",
          "source": "replay_check.json", "value": 1.0},
-        {"id": "A2", "claim": f"工具转移 top-3={l1_tool.get('top3_acc','?')} ECE={l1_tool.get('ECE','?')}",
+        {"id": "A2", "claim": f"tool transition top-3={l1_tool.get('top3_acc','?')} ECE={l1_tool.get('ECE','?')}",
          "source": "v3b_distribution.json"},
-        {"id": "A3", "claim": f"溯源 top-1={l1_prov.get('top1_all','?')} eff_cand={l1_prov.get('eff_candidates','?')}",
+        {"id": "A3", "claim": f"provenance top-1={l1_prov.get('top1_all','?')} eff_cand={l1_prov.get('eff_candidates','?')}",
          "source": "v3j_trace_graph.json"},
-        {"id": "A4", "claim": f"R 步 top-3={regime.get('R_top3','?')} (F 不可预测)",
+        {"id": "A4", "claim": f"R steps top-3={regime.get('R_top3','?')} (F unpredictable)",
          "source": "v3g_regime.json"},
-        {"id": "A5", "claim": f"regime AUROC={regime.get('regime_auroc','?')} (不可预测 regime)",
+        {"id": "A5", "claim": f"regime AUROC={regime.get('regime_auroc','?')} (unpredictable regime)",
          "source": "v3g_regime.json"},
-        {"id": "A6", "claim": f"代码图 lift={graph.get('neighbor_lift','?')} (无转移信号)",
+        {"id": "A6", "claim": f"code graph lift={graph.get('neighbor_lift','?')} (no transition signal)",
          "source": "v3i_graph_probe.json"},
-        {"id": "A10", "claim": f"judge 挑 gold 溯源步 {judge.get('judge_gold_prov_rate','?'):.0%} vs 基线 {judge.get('judge_gold_prov_baseline','?'):.1%}",
+        {"id": "A10", "claim": f"judge picks gold provenance steps {judge.get('judge_gold_prov_rate','?'):.0%} vs baseline {judge.get('judge_gold_prov_baseline','?'):.1%}",
          "source": "x2_judge_mechanism.json"},
-        {"id": "A11", "claim": f"失败 top1 Δ={l2.get('causal_top1_delta_failed','?'):.3f} CI 显著",
+        {"id": "A11", "claim": f"failed top1 Δ={l2.get('causal_top1_delta_failed','?'):.3f} CI significant",
          "source": "analysis.json"},
-        {"id": "A12", "claim": f"judge 系统偏后 pos={judge.get('within_class_pos','?'):.3f} vs null=0.5",
+        {"id": "A12", "claim": f"judge systematically skews late pos={judge.get('within_class_pos','?'):.3f} vs null=0.5",
          "source": "x2_judge_mechanism.json"},
-        {"id": "A13", "claim": f"脆弱成功率={l2.get('fragile_success_rate','?'):.1%} CI{l2.get('fragile_ci95','?')}",
+        {"id": "A13", "claim": f"fragile success rate={l2.get('fragile_success_rate','?'):.1%} CI{l2.get('fragile_ci95','?')}",
          "source": "process_uncertainty.json"},
-        {"id": "A14", "claim": f"U_policy={uq.get('U_policy','?')} (23 instance × K=4)",
+        {"id": "A14", "claim": f"U_policy={uq.get('U_policy','?')} (23 instances × K=4)",
          "source": "upolicy_t3.json"},
-        {"id": "A15", "claim": f"三态 INESTIMABLE={uq.get('three_state_inestimable','?')} NO_EFFECT={uq.get('three_state_no_effect','?')} EFFECT={uq.get('three_state_effect','?')}",
+        {"id": "A15", "claim": f"three-state INESTIMABLE={uq.get('three_state_inestimable','?')} NO_EFFECT={uq.get('three_state_no_effect','?')} EFFECT={uq.get('three_state_effect','?')}",
          "source": "estimability.json"},
-        {"id": "X1", "claim": f"联合有效候选={joint_l1.get('joint_eff_candidates','?'):.2f} H_tool~v0 n.s.",
+        {"id": "X1", "claim": f"joint effective candidates={joint_l1.get('joint_eff_candidates','?'):.2f} H_tool~v0 n.s.",
          "source": "x1_joint_l1.json"},
-        {"id": "X2", "claim": "within-class pos=0.746 显著（judge 偏后）; 类内精确定位仍随机",
+        {"id": "X2", "claim": "within-class pos=0.746 significant (judge skews late); exact within-class localization still random",
          "source": "x2_judge_mechanism.json"},
-        {"id": "X7", "claim": "H_tool 不预测脆弱成功 AUROC=0.526（功效已确认 rho=+0.394）",
+        {"id": "X7", "claim": "H_tool does not predict fragile success AUROC=0.526 (power confirmed rho=+0.394)",
          "source": "x7_fragile_l1.json"},
     ]
 
@@ -312,43 +312,43 @@ def main() -> int:
         json.dumps(synthesis, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    print("=== SCAE 体系综合摘要 ===")
-    print(f"V4' 进度: {n_done}/38 instances")
+    print("=== SCAE overall synthesis summary ===")
+    print(f"V4' progress: {n_done}/38 instances")
     print()
-    print("── L1 层 ──")
-    print(f"  工具转移: top-3={l1_tool.get('top3_acc','?')}, "
+    print("── L1 layer ──")
+    print(f"  tool transition: top-3={l1_tool.get('top3_acc','?')}, "
           f"eff_cand={l1_tool.get('eff_candidates','?')}, "
           f"mean H_tool={l1_tool.get('H_tool_mean_x1','?')}, "
           f"exp(H)={l1_tool.get('H_tool_exp_mean','?')}")
-    print(f"  溯源: top-1={l1_prov.get('top1_all','?')}, "
+    print(f"  provenance: top-1={l1_prov.get('top1_all','?')}, "
           f"eff_cand={l1_prov.get('eff_candidates','?')}, "
           f"H_prov={l1_prov.get('H_prov','?')}")
-    print(f"  联合有效候选: {joint_l1.get('joint_eff_candidates','?'):.2f} "
-          f"(工具 × 溯源，独立假设)")
-    print(f"  代码图: lift={graph.get('neighbor_lift','?')} (已否证)")
+    print(f"  joint effective candidates: {joint_l1.get('joint_eff_candidates','?'):.2f} "
+          f"(tool × provenance, independence assumption)")
+    print(f"  code graph: lift={graph.get('neighbor_lift','?')} (disproved)")
     print()
-    print("── L2 层 ──")
-    print(f"  基线 recall={l2.get('baseline_recall','?'):.3f}, n={l2.get('n_total','?')}")
-    print(f"  脆弱成功率={l2.get('fragile_success_rate','?'):.1%} CI{l2.get('fragile_ci95','?')}")
-    print(f"  失败 top1 Δ={l2.get('causal_top1_delta_failed','?'):.3f} (显著)")
+    print("── L2 layer ──")
+    print(f"  baseline recall={l2.get('baseline_recall','?'):.3f}, n={l2.get('n_total','?')}")
+    print(f"  fragile success rate={l2.get('fragile_success_rate','?'):.1%} CI{l2.get('fragile_ci95','?')}")
+    print(f"  failed top1 Δ={l2.get('causal_top1_delta_failed','?'):.3f} (significant)")
     print(f"  D1 disagreement={l2.get('D1_disagreement','?'):.3f}, "
           f"D3 displacement={l2.get('D3_displacement_mean','?'):.3f}")
     print()
-    print("── judge 机制（X2）──")
-    print(f"  judge 选 gold 溯源步: {judge.get('judge_gold_prov_rate','?'):.0%} "
-          f"vs 基线 {judge.get('judge_gold_prov_baseline','?'):.1%}")
-    print(f"  within-class pos: {judge.get('within_class_pos','?'):.3f} (null=0.5, 显著)")
-    print(f"  同空间对比(n={judge.get('same_space_n','?')}): "
+    print("── judge mechanism (X2) ──")
+    print(f"  judge picks gold provenance steps: {judge.get('judge_gold_prov_rate','?'):.0%} "
+          f"vs baseline {judge.get('judge_gold_prov_baseline','?'):.1%}")
+    print(f"  within-class pos: {judge.get('within_class_pos','?'):.3f} (null=0.5, significant)")
+    print(f"  same-space comparison(n={judge.get('same_space_n','?')}): "
           f"judge={judge.get('same_space_judge_rate','?'):.1%} "
           f"causal={judge.get('same_space_causal_rate','?'):.1%}")
     print()
-    print("── L3 桥接层 ──")
-    print(f"  X3 干预: {bridge_l1_l2['X3_plan']['n_candidates']} 候选, "
+    print("── L3 bridge layer ──")
+    print(f"  X3 intervention: {bridge_l1_l2['X3_plan']['n_candidates']} candidates, "
           f"median first_gold_t={bridge_l1_l2['X3_plan']['first_gold_t_median']}, "
           f"≈{bridge_l1_l2['X3_plan']['estimated_hours']:.1f}h")
-    print(f"  X4 U^exec↔H 相关: {x4_status}")
-    print(f"  X5 步级功效: {x5_status}")
-    print(f"  X6 预算分配: {x6_status}")
+    print(f"  X4 U^exec↔H correlation: {x4_status}")
+    print(f"  X5 step-level power: {x5_status}")
+    print(f"  X6 budget allocation: {x6_status}")
     print()
     print(f"→ {args.out}")
     return 0

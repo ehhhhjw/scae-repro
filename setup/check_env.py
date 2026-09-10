@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""环境自检：在跑任何实验之前确认前置条件齐备。
+"""Environment self-check: confirm the prerequisites are in place before running any experiment.
 
-分两档报告：
-  [离线分析]  只需 python3 + numpy。够用就能跑 scripts/04_analysis_offline.sh
-  [数据采集]  另需 codex CLI + API key + 数据集快照。够用才能重跑 12.7 小时的 agent 执行
+Reports two profiles:
+  [offline analysis]  needs only python3 + numpy. Enough to run scripts/04_analysis_offline.sh
+  [data collection]   additionally needs codex CLI + API key + dataset snapshot. Required to rerun the 12.7-hour agent execution
 
-用法
-----
+Usage
+-----
 python3 setup/check_env.py
-python3 setup/check_env.py --collect   # 同时检查数据采集档的前置条件
+python3 setup/check_env.py --collect   # also check the data-collection profile prerequisites
 """
 
 from __future__ import annotations
@@ -29,21 +29,21 @@ _results: list[tuple[str, str, str]] = []
 
 def record(level: str, item: str, detail: str = "") -> None:
     _results.append((level, item, detail))
-    print(f"[{level}] {item}" + (f" — {detail}" if detail else ""))
+    print(f"[{level}] {item}" + (f" -- {detail}" if detail else ""))
 
 
 def check_python() -> None:
     v = sys.version_info
     s = f"{v.major}.{v.minor}.{v.micro}"
     if (v.major, v.minor) >= (3, 10):
-        record(OK, "Python", f"{s}（要求 >= 3.10）")
+        record(OK, "Python", f"{s} (requires >= 3.10)")
     else:
-        record(BAD, "Python", f"{s}，但代码用了 3.10+ 语法（X | Y 类型标注）")
+        record(BAD, "Python", f"{s}, but the code uses 3.10+ syntax (X | Y type annotations)")
 
 
 def check_numpy() -> None:
     if importlib.util.find_spec("numpy") is None:
-        record(BAD, "numpy", "未安装 —— 部分分析脚本需要。pip install numpy")
+        record(BAD, "numpy", "not installed -- some analysis scripts need it. pip install numpy")
         return
     import numpy as np
 
@@ -51,7 +51,7 @@ def check_numpy() -> None:
 
 
 def check_package_imports() -> None:
-    """确认 pilot 包可被导入（复现包完整性）。"""
+    """Confirm the pilot package can be imported (reproduction package integrity)."""
     sys.path.insert(0, str(REPO_ROOT))
     try:
         import pilot.probes.task as T  # noqa: F401
@@ -59,9 +59,9 @@ def check_package_imports() -> None:
         import pilot.attribution.causal  # noqa: F401
         import pilot.uq.predictor  # noqa: F401
 
-        record(OK, "pilot 包导入", "harness / attribution / uq / probes 均可导入")
+        record(OK, "pilot package import", "harness / attribution / uq / probes all importable")
     except Exception as e:  # noqa: BLE001
-        record(BAD, "pilot 包导入", f"{type(e).__name__}: {e}")
+        record(BAD, "pilot package import", f"{type(e).__name__}: {e}")
 
 
 def check_dataset() -> None:
@@ -69,39 +69,39 @@ def check_dataset() -> None:
     from pilot.probes import task as T
 
     csv_path, projects = T.CSV_PATH, T.PROJECTS_ROOT
-    src_csv = "SCAE_CSV" if os.environ.get("SCAE_CSV") else "默认"
-    src_prj = "SCAE_PROJECTS" if os.environ.get("SCAE_PROJECTS") else "默认"
+    src_csv = "SCAE_CSV" if os.environ.get("SCAE_CSV") else "default"
+    src_prj = "SCAE_PROJECTS" if os.environ.get("SCAE_PROJECTS") else "default"
 
     if not csv_path.exists():
         record(
             BAD,
-            f"instance_summary.csv（{src_csv}）",
-            f"找不到 {csv_path}。跑 setup/prepare_dataset.py 生成，或 export SCAE_CSV=...",
+            f"instance_summary.csv ({src_csv})",
+            f"cannot find {csv_path}. Run setup/prepare_dataset.py to generate it, or export SCAE_CSV=...",
         )
         return
     try:
         insts = T.load_instances()
     except Exception as e:  # noqa: BLE001
-        record(BAD, "instance_summary.csv 解析", f"{type(e).__name__}: {e}")
+        record(BAD, "instance_summary.csv parse", f"{type(e).__name__}: {e}")
         return
 
     n_gold0 = sum(1 for i in insts if not i.gold)
     multi = sum(1 for i in insts if len(i.gold) > 1)
-    detail = f"{len(insts)} 实例，多文件 {multi}，无 gold {n_gold0}（{csv_path}）"
-    record(OK if n_gold0 == 0 else WARN, f"instance_summary.csv（{src_csv}）", detail)
+    detail = f"{len(insts)} instances, multi-file {multi}, no gold {n_gold0} ({csv_path})"
+    record(OK if n_gold0 == 0 else WARN, f"instance_summary.csv ({src_csv})", detail)
 
     if not projects.exists():
         record(
             WARN,
-            f"仓库快照（{src_prj}）",
-            f"找不到 {projects} —— 只跑离线分析可忽略；定位实验必需",
+            f"repository snapshots ({src_prj})",
+            f"cannot find {projects} -- ignorable if you only run offline analysis; required for the localization experiment",
         )
         return
     present = sum(1 for i in insts if (projects / i.instance_id / ".git").exists())
     lvl = OK if present == len(insts) else WARN
-    record(lvl, f"仓库快照（{src_prj}）", f"{present}/{len(insts)} 个实例有 git 快照（{projects}）")
+    record(lvl, f"repository snapshots ({src_prj})", f"{present}/{len(insts)} instances have a git snapshot ({projects})")
     if present:
-        # 抽查 base_commit，泄题是本项目最大的坑
+        # spot-check base_commit; answer leakage is the biggest pitfall in this project
         sample = [i for i in insts if (projects / i.instance_id / ".git").exists()][:20]
         bad = []
         for i in sample:
@@ -115,39 +115,39 @@ def check_dataset() -> None:
         if bad:
             record(
                 WARN,
-                "base_commit 抽查",
-                f"{len(bad)}/{len(sample)} 个快照 HEAD != base_commit（跑前会自动 reset，"
-                f"但请确认没有 gold patch 叠加）",
+                "base_commit spot-check",
+                f"{len(bad)}/{len(sample)} snapshots have HEAD != base_commit (an automatic reset "
+                f"runs before the task, but confirm no gold patch is layered on)",
             )
         else:
-            record(OK, "base_commit 抽查", f"抽查 {len(sample)} 个，HEAD 均等于 base_commit")
+            record(OK, "base_commit spot-check", f"spot-checked {len(sample)}, HEAD equals base_commit for all")
 
 
 def check_codex() -> None:
     exe = shutil.which(os.environ.get("SCAE_CODEX_BIN", "codex"))
     if not exe:
-        record(BAD, "codex CLI", "不在 PATH 中 —— 数据采集必需（论文用 codex 0.145.0）")
+        record(BAD, "codex CLI", "not in PATH -- required for data collection (the paper uses codex 0.145.0)")
         return
     try:
         r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30)
         ver = (r.stdout or r.stderr).strip().splitlines()[0] if (r.stdout or r.stderr) else "?"
-        record(OK, "codex CLI", f"{ver}（{exe}）")
+        record(OK, "codex CLI", f"{ver} ({exe})")
     except Exception as e:  # noqa: BLE001
-        record(WARN, "codex CLI", f"存在但无法取版本: {e}")
+        record(WARN, "codex CLI", f"present but version could not be read: {e}")
 
 
 def check_api_key() -> None:
     key = os.environ.get("IDEALAB_API_KEY")
     if key:
-        record(OK, "IDEALAB_API_KEY", f"已设置（{len(key)} 字符）")
+        record(OK, "IDEALAB_API_KEY", f"set ({len(key)} chars)")
     else:
-        record(BAD, "IDEALAB_API_KEY", "未设置 —— 数据采集与 judge 实验必需")
+        record(BAD, "IDEALAB_API_KEY", "not set -- required for data collection and the judge experiment")
 
 
 def check_git() -> None:
     exe = shutil.which("git")
     if not exe:
-        record(BAD, "git", "不在 PATH 中 —— 仓库 reset 必需")
+        record(BAD, "git", "not in PATH -- required for repository reset")
         return
     r = subprocess.run(["git", "--version"], capture_output=True, text=True)
     record(OK, "git", r.stdout.strip())
@@ -156,31 +156,31 @@ def check_git() -> None:
 def check_runs_dir() -> None:
     runs = REPO_ROOT / "pilot" / "runs"
     if not runs.exists():
-        record(WARN, "pilot/runs/", "不存在 —— 采集阶段会自动创建（复现包不携带录制数据）")
+        record(WARN, "pilot/runs/", "does not exist -- created automatically during collection (the reproduction package ships no recorded data)")
         return
     n = len(list(runs.glob("*")))
-    record(OK if n else WARN, "pilot/runs/", f"{n} 个条目" if n else "空目录（尚未采集）")
+    record(OK if n else WARN, "pilot/runs/", f"{n} entries" if n else "empty directory (not yet collected)")
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="SCAE 复现环境自检")
-    ap.add_argument("--collect", action="store_true", help="同时检查数据采集档前置条件")
+    ap = argparse.ArgumentParser(description="SCAE reproduction environment self-check")
+    ap.add_argument("--collect", action="store_true", help="also check the data-collection profile prerequisites")
     args = ap.parse_args()
 
     print("=" * 66)
-    print("SCAE 复现环境自检")
+    print("SCAE reproduction environment self-check")
     print("=" * 66)
-    print("\n--- 离线分析档（只需 python + numpy）---")
+    print("\n--- offline analysis profile (needs only python + numpy) ---")
     check_python()
     check_numpy()
     check_package_imports()
     check_runs_dir()
 
-    print("\n--- 数据集 ---")
+    print("\n--- dataset ---")
     check_dataset()
 
     if args.collect:
-        print("\n--- 数据采集档（重跑 agent 执行）---")
+        print("\n--- data collection profile (rerun agent execution) ---")
         check_git()
         check_codex()
         check_api_key()
@@ -188,13 +188,13 @@ def main() -> None:
     n_bad = sum(1 for lvl, _, _ in _results if lvl == BAD)
     n_warn = sum(1 for lvl, _, _ in _results if lvl == WARN)
     print("\n" + "=" * 66)
-    print(f"结果：{len(_results)} 项检查，FAIL {n_bad}，warn {n_warn}")
+    print(f"result: {len(_results)} checks, FAIL {n_bad}, warn {n_warn}")
     if n_bad:
-        print("有 FAIL 项，先按上面的提示处理。见 REPRODUCE.md。")
+        print("There are FAIL items; handle them per the hints above first. See REPRODUCE.md.")
     elif n_warn:
-        print("无 FAIL。warn 项按你要跑的阶段决定是否需要处理。")
+        print("No FAIL. Whether the warn items need handling depends on which stage you plan to run.")
     else:
-        print("全部通过。")
+        print("All passed.")
     print("=" * 66)
     sys.exit(1 if n_bad else 0)
 

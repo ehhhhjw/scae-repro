@@ -1,31 +1,32 @@
-"""X1（零 API）：L1 联合评估与「何时可信」分层。
+"""X1 (zero API): L1 joint evaluation and "when to trust" stratification.
 
-命题
-----
-工具通道 H_tool_t 与溯源对象通道 H_prov_t 两者的联合分布可用；
-且存在可识别的「高可信步」子集，其上 ECE < 0.05 且 top-k 显著高于全局基线。
+Claim
+-----
+The joint distribution of the tool channel H_tool_t and the provenance-object channel
+H_prov_t is usable; and there is an identifiable subset of "high-confidence steps" on which
+ECE < 0.05 and top-k is significantly above the global baseline.
 
-被估量
+Estimands
+---------
+1. top-k / ECE of the joint action (tool, obj) (common denominator, uncovered = miss)
+2. step-level distribution summary of the tool channel H_tool
+3. step-level distribution summary of the provenance-object channel H_prov
+4. H_tool mean comparison stratified by step position × tool type × provenance coverage × regime
+5. correlation between H_tool and H_prov (independent-component test)
+
+Design
 ------
-1. 联合动作 (tool, obj) 的 top-k / ECE（共同分母，未覆盖记 miss）
-2. 工具通道 H_tool 的步级分布摘要
-3. 溯源对象通道 H_prov 的步级分布摘要
-4. 按步位 × 工具类型 × 溯源覆盖 × regime 分层的 H_tool 均值对比
-5. H_tool 与 H_prov 的相关性（独立分量检验）
+- tool channel: entropy_rows from tool_model_official.json (7696 step-wise H_tool)
+- provenance channel: derive H_prov from the per-episode step-wise provenance candidate counts
+  in v3j_trace_graph.json (effective candidates = exp(H), so H = log(eff_cand))
+- all analysis runs on the 499 rollouts of full_locate
 
-设计
-----
-- 工具通道：从 tool_model_official.json 的 entropy_rows（7696 个逐步 H_tool）
-- 溯源通道：从 v3j_trace_graph.json 的每 episode 逐步溯源候选数推算 H_prov
-  （effective candidates = exp(H)，故 H = log(eff_cand)）
-- 全部分析在 full_locate 的 499 个 rollout 上
-
-统计纪律
---------
-- 共同分母：全部决策点（未覆盖记 miss）
-- 并列用闭式期望
-- episode 级 bootstrap B=2000
-- 多重比较 BH-FDR q=0.10
+Statistical discipline
+----------------------
+- common denominator: all decision points (uncovered = miss)
+- ties handled by closed-form expectation
+- episode-level bootstrap B=2000
+- multiple comparisons BH-FDR q=0.10
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ SEED = 20260814
 
 def boot_ci(vals: list[float], b: int = 2000, seed: int = SEED) -> dict:
     if not vals:
-        return {"note": "无样本"}
+        return {"note": "no samples"}
     rng = random.Random(seed)
     pts = []
     for _ in range(b):
@@ -64,7 +65,7 @@ def boot_ci(vals: list[float], b: int = 2000, seed: int = SEED) -> dict:
 
 def paired_ci(a: list[float], b_: list[float], bnum: int = 2000) -> dict:
     if len(a) != len(b_) or not a:
-        return {"note": f"点集不匹配 {len(a)} vs {len(b_)}"}
+        return {"note": f"point sets mismatch {len(a)} vs {len(b_)}"}
     rng = random.Random(SEED)
     pts = []
     for _ in range(bnum):
@@ -105,7 +106,7 @@ def _pearson(a: list[float], b_: list[float]) -> float:
 
 def spearman_boot(xs: list[float], ys: list[float], b: int = 2000) -> dict:
     if len(xs) < 5:
-        return {"note": "样本不足"}
+        return {"note": "insufficient samples"}
     rho = _pearson(_rankdata(xs), _rankdata(ys))
     rng = random.Random(SEED)
     pts = []
@@ -128,30 +129,31 @@ def main() -> int:
     ap.add_argument("--out", default="pilot/runs/x1_joint_l1.json")
     args = ap.parse_args()
 
-    # ---- 1. 载入工具通道 entropy_rows ----
+    # ---- 1. load the tool-channel entropy_rows ----
     tm = json.loads(Path(args.tool_model).read_text())
     entropy_rows = tm.get("entropy_rows", [])
-    # 建立 (instance_id, t) → H_tool 索引
+    # build the (instance_id, t) → H_tool index
     h_tool_idx: dict[tuple[str, int], float] = {}
     for row in entropy_rows:
         h_tool_idx[(row["instance_id"], row["t"])] = row["H_tool"]
-    print(f"工具通道 entropy_rows: {len(h_tool_idx)} 个步")
+    print(f"tool-channel entropy_rows: {len(h_tool_idx)} steps")
 
-    # ---- 2. 载入溯源通道数据（从 v3j_trace_graph.json 复用 prov_lastout_ranked）----
-    # 我们不重新跑 v3j，而是从结果中提取已知的有效候选数
-    # prov_lastout_ranked 的 eff_candidates = 3.46，这是全局值
-    # 对 X1 的分层分析，我们需要逐步值；这里先用全局 H_prov = log(3.46)
-    # 作为整体校准；逐步计算需要重新运行 v3j 的逐步分支（见后面的精细版本）
+    # ---- 2. load provenance-channel data (reuse prov_lastout_ranked from v3j_trace_graph.json) ----
+    # We do not rerun v3j; we extract the known effective candidate count from its results.
+    # prov_lastout_ranked has eff_candidates = 3.46, which is a global value.
+    # X1's stratified analysis needs step-wise values; for now use global H_prov = log(3.46)
+    # as an overall calibration; step-wise values require rerunning v3j's step-wise branch
+    # (see the finer-grained version below).
     prov_data = json.loads(Path(args.prov_results).read_text())
     prov_preds = prov_data.get("G1_predictors", {})
     prov_lastout = prov_preds.get("prov_lastout_ranked", {})
-    global_h_prov = math.log(3.46) if True else 0.0  # 全局 effective candidates
+    global_h_prov = math.log(3.46) if True else 0.0  # global effective candidates
 
-    # ---- 3. 从 rollout 计算逐步熵 ----
+    # ---- 3. compute step-wise entropy from rollouts ----
     insts = {i.instance_id: i for i in T.load_instances()}
     runs_root = Path(args.runs_root)
 
-    # 逐 instance 收集 (H_tool_t, tool_t, regime_t, pos_t)
+    # collect (H_tool_t, tool_t, regime_t, pos_t) per instance
     step_records: list[dict] = []   # {iid, t, H_tool, tool, regime, pos, recall}
     h_tool_per_inst: dict[str, list[float]] = defaultdict(list)
     recall_per_inst: dict[str, float] = {}
@@ -168,7 +170,7 @@ def main() -> int:
             continue
         if not steps:
             continue
-        # recall（0/1 for this instance）
+        # recall (0/1 for this instance)
         recall = getattr(rl, "recall", None)
         if recall is None:
             # fallback: compute from gold
@@ -180,7 +182,7 @@ def main() -> int:
                 recall = None
         if recall is not None:
             recall_per_inst[iid] = float(recall)
-        seen: list[str] = []   # 访问过的对象，按顺序
+        seen: list[str] = []   # visited objects, in order
         for s in steps:
             p = parse_step(s)
             obj = p.obj or p.path or ""
@@ -198,9 +200,9 @@ def main() -> int:
             })
             h_tool_per_inst[iid].append(h_t)
 
-    print(f"逐步记录 {len(step_records)} 条（{len(h_tool_per_inst)} 个 instance）")
+    print(f"{len(step_records)} step records ({len(h_tool_per_inst)} instances)")
 
-    # ---- 4. H_tool 的分布摘要 ----
+    # ---- 4. distribution summary of H_tool ----
     all_h_tool = [r["H_tool"] for r in step_records]
     h_tool_stats = {
         "n": len(all_h_tool),
@@ -210,21 +212,21 @@ def main() -> int:
         "p10": round(sorted(all_h_tool)[int(0.10 * len(all_h_tool))], 4),
         "p90": round(sorted(all_h_tool)[int(0.90 * len(all_h_tool))], 4),
         "global_exp_H_tool": round(math.exp(statistics.mean(all_h_tool)), 3),
-        "note": "exp(H) = 有效候选数",
+        "note": "exp(H) = effective candidate count",
     }
 
-    # ---- 5. 按工具类型分层的 H_tool ----
+    # ---- 5. H_tool stratified by tool type ----
     by_tool: dict[str, list[float]] = defaultdict(list)
     for r in step_records:
         by_tool[r["tool"]].append(r["H_tool"])
     h_by_tool = {k: boot_ci(v) for k, v in sorted(by_tool.items())}
 
-    # 按 regime 分层
+    # stratify by regime
     h_by_regime = {
         "R": boot_ci([r["H_tool"] for r in step_records if r["regime"] == "R"]),
         "F": boot_ci([r["H_tool"] for r in step_records if r["regime"] == "F"]),
     }
-    # R vs F 配对对比（instance 级平均）
+    # R vs F paired contrast (instance-level means)
     iids_sorted = sorted(h_tool_per_inst.keys())
     regime_by_inst_r: dict[str, list[float]] = defaultdict(list)
     regime_by_inst_f: dict[str, list[float]] = defaultdict(list)
@@ -233,24 +235,24 @@ def main() -> int:
             regime_by_inst_r[r["iid"]].append(r["H_tool"])
         else:
             regime_by_inst_f[r["iid"]].append(r["H_tool"])
-    # 只取两 regime 都有样本的 instance 做配对
+    # pair only instances that have samples in both regimes
     common_iids = sorted(set(regime_by_inst_r) & set(regime_by_inst_f))
     pair_r = [statistics.mean(regime_by_inst_r[i]) for i in common_iids]
     pair_f = [statistics.mean(regime_by_inst_f[i]) for i in common_iids]
 
-    # ---- 6. 按步位三分层 H_tool ----
+    # ---- 6. H_tool in three step-position strata ----
     early_h = [r["H_tool"] for r in step_records if r["pos"] < 0.33]
     mid_h = [r["H_tool"] for r in step_records if 0.33 <= r["pos"] < 0.67]
     late_h = [r["H_tool"] for r in step_records if r["pos"] >= 0.67]
 
-    # ---- 7. 「高可信步」定义：H_tool < median（低熵 = 工具选择更确定） ----
+    # ---- 7. "high-confidence step" definition: H_tool < median (low entropy = more certain tool choice) ----
     med_h = statistics.median(all_h_tool)
     high_conf = [r for r in step_records if r["H_tool"] < med_h]
     low_conf = [r for r in step_records if r["H_tool"] >= med_h]
 
-    # ---- 8. instance 级平均 H_tool vs recall 的相关 ----
-    # 对 fragile_success（0<v0<1）的 instance，检验其 H_tool 是否更高
-    # 需要 causal_v0 数据
+    # ---- 8. correlation of instance-level mean H_tool vs recall ----
+    # For fragile_success instances (0<v0<1), test whether their H_tool is higher.
+    # Requires causal_v0 data.
     try:
         attr_lines = []
         for f in sorted(Path("pilot/runs/full_attr").glob("shard*/attribution.jsonl")):
@@ -276,10 +278,10 @@ def main() -> int:
         fragile_h[:min(len(fragile_h), len(stable_h))],
         stable_h[:min(len(fragile_h), len(stable_h))]) if fragile_h and stable_h else {}
 
-    # ---- 9. H_tool vs H_prov 的相关（检验两分量是否独立） ----
-    # 全局：工具通道 mean H 与溯源通道 mean eff_cand 的 Spearman
+    # ---- 9. correlation of H_tool vs H_prov (test whether the two components are independent) ----
+    # Global: Spearman between the tool channel's mean H and the provenance channel's mean eff_cand
     # H_prov per instance from v3j if available, else derive from hist_freq regime split
-    # 直接用 v3h per_episode 的 obj_mi 作为代理
+    # Use obj_mi from v3h per_episode directly as a proxy
     try:
         v3h = json.loads(Path("pilot/runs/v3h_reuse.json").read_text())
         per_ep = v3h.get("per_episode", [])
@@ -289,9 +291,9 @@ def main() -> int:
         obj_mi_y = [float(obj_mi_by_id[i]) for i in common_2]
         corr_htool_objmi = spearman_boot(h_tool_x, obj_mi_y)
     except Exception:
-        corr_htool_objmi = {"note": "v3h per_episode 不可用"}
+        corr_htool_objmi = {"note": "v3h per_episode unavailable"}
 
-    # ---- 10. 汇总 ----
+    # ---- 10. summary ----
     res = {
         "n_instances": len(h_tool_per_inst),
         "n_step_records": len(step_records),
@@ -299,13 +301,13 @@ def main() -> int:
         "H_prov_global": {
             "eff_candidates": 3.46,
             "H_prov": round(math.log(3.46), 4),
-            "note": "来自 v3j prov_lastout_ranked；有效候选数 3.46",
+            "note": "from v3j prov_lastout_ranked; effective candidate count 3.46",
         },
         "joint_effective_candidates": {
             "H_tool": h_tool_stats["global_exp_H_tool"],
             "H_prov": round(math.exp(math.log(3.46)), 3),
             "product_exp_H_joint": round(h_tool_stats["global_exp_H_tool"] * 3.46, 2),
-            "note": "若两通道独立，联合有效候选数 = exp(H_tool) × exp(H_prov)",
+            "note": "if the two channels are independent, joint effective candidates = exp(H_tool) × exp(H_prov)",
         },
         "H_tool_by_tool": h_by_tool,
         "H_tool_by_regime": h_by_regime,
@@ -342,23 +344,23 @@ def main() -> int:
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    # ---- 输出摘要 ----
-    print(f"\n=== X1：L1 联合评估摘要 ===")
-    print(f"实例数: {res['n_instances']}，步数: {res['n_step_records']}")
-    print(f"\nH_tool 全局分布:")
+    # ---- print summary ----
+    print(f"\n=== X1: L1 joint evaluation summary ===")
+    print(f"instances: {res['n_instances']}, steps: {res['n_step_records']}")
+    print(f"\nH_tool global distribution:")
     hs = res["H_tool_global"]
     print(f"  mean={hs['mean']:.4f}  median={hs['median']:.4f}  "
           f"sd={hs['sd']:.4f}  exp(H_mean)={hs['global_exp_H_tool']:.3f}")
-    print(f"\n联合有效候选数（独立假设下）:")
+    print(f"\njoint effective candidates (under the independence assumption):")
     jec = res["joint_effective_candidates"]
-    print(f"  工具: {jec['H_tool']:.3f}  对象(溯源): {jec['H_prov']:.3f}  "
-          f"乘积: {jec['product_exp_H_joint']:.2f}")
-    print(f"\nH_tool 按工具类型:")
+    print(f"  tool: {jec['H_tool']:.3f}  object(provenance): {jec['H_prov']:.3f}  "
+          f"product: {jec['product_exp_H_joint']:.2f}")
+    print(f"\nH_tool by tool type:")
     for k, v in res["H_tool_by_tool"].items():
         if "note" not in v:
             print(f"  {k:20s}: {v['mean']:.4f} CI{v['ci95']}")
     r_info = res["H_tool_by_regime"]
-    print(f"\nH_tool 按 regime:")
+    print(f"\nH_tool by regime:")
     for rg in ("R", "F"):
         v = r_info[rg]
         if "note" not in v:
@@ -366,19 +368,19 @@ def main() -> int:
     d_rg = res["H_tool_R_vs_F_paired"]["diff"]
     if "note" not in d_rg:
         print(f"  R−F diff: {d_rg['diff']:+.4f} CI{d_rg['ci95']} "
-              f"{'显著' if d_rg['significant'] else '不显著'}")
+              f"{'significant' if d_rg['significant'] else 'not significant'}")
     corr = res["H_tool_vs_v0_corr"]
     if "note" not in corr:
-        print(f"\n步级 H_tool 均值 ~ causal_v0  Spearman rho={corr['rho']:+.4f} "
-              f"CI{corr['ci95']}  {'显著' if corr['significant'] else '不显著'}")
+        print(f"\nstep-level mean H_tool ~ causal_v0  Spearman rho={corr['rho']:+.4f} "
+              f"CI{corr['ci95']}  {'significant' if corr['significant'] else 'not significant'}")
     fs = res["fragile_vs_stable_H_tool"]
     if fs["fragile_n"] > 0 and fs["stable_n"] > 0:
-        print(f"\n脆弱成功(n={fs['fragile_n']}) H_tool 均值: {fs['fragile_mean_H']:.4f}")
-        print(f"稳健成功(n={fs['stable_n']}) H_tool 均值: {fs['stable_mean_H']:.4f}")
+        print(f"\nfragile success (n={fs['fragile_n']}) mean H_tool: {fs['fragile_mean_H']:.4f}")
+        print(f"robust success (n={fs['stable_n']}) mean H_tool: {fs['stable_mean_H']:.4f}")
         d_fs = fs["diff"]
         if "note" not in d_fs:
             print(f"  diff: {d_fs['diff']:+.4f} CI{d_fs['ci95']} "
-                  f"{'显著' if d_fs['significant'] else '不显著'}")
+                  f"{'significant' if d_fs['significant'] else 'not significant'}")
     print(f"\n→ {args.out}")
     return 0
 

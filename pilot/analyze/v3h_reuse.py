@@ -1,28 +1,30 @@
-"""V3h：「agent 倾向复用已用过的工具/文件」这一假设的严格检验。零 API。
+"""V3h: a rigorous test of the hypothesis "the agent tends to reuse tools/files it has already used". Zero API.
 
-为什么需要零假设对照
---------------------
-朴素读法是看复用率（P(next ∈ 之前出现过的)）。但该量是**置换不变量**：
-序列位置 2..n 中"首次出现"的个数恒为 #distinct−1，故
+Why a null-hypothesis control is needed
+---------------------------------------
+The naive reading is to look at the reuse rate (P(next ∈ something seen before)). But that quantity
+is a **permutation invariant**: the number of "first occurrences" among sequence positions 2..n is
+always #distinct−1, hence
 
-    复用率 = (n − #distinct) / (n − 1)
+    reuse rate = (n − #distinct) / (n − 1)
 
-完全由"多少步、多少个不同对象"决定，把序列任意打乱都不变。
-所以 33.0% 的重访率**不构成任何"倾向"的证据** —— 它只是
-「24 步里只碰了 14 个不同对象」的算术后果。本脚本把这一点作为
-零方差检查 (O0) 显式验证，避免把算术当发现。
+is fully determined by "how many steps, how many distinct objects", and is unchanged by any shuffle
+of the sequence. So a 33.0% revisit rate **is not evidence of any "tendency"** -- it is merely the
+arithmetic consequence of "only 14 distinct objects touched over 24 steps". This script verifies
+that explicitly as a zero-variance check (O0), to avoid mistaking arithmetic for a finding.
 
-真正可检验的是复用的**结构**，即在给定成分下时序排列是否比随机更"聚集"：
+What is actually testable is the **structure** of reuse, i.e. whether, given the composition, the temporal arrangement is more "clustered" than random:
 
-  T1/O1  紧邻重复      P(x_{t+1} = x_t)                    置换检验
-  T2/O2  序列依赖      互信息 I(x_t; x_{t+1})              置换检验
-  O3     突发性        同一对象相邻两次出现的间隔          置换检验
-  O4     高频偏好      重访目标的历史访问次数 vs 均匀       闭式期望
-  O5     近期偏好      重访目标的新近度排名 vs 均匀         闭式期望
+  T1/O1  adjacent repeat   P(x_{t+1} = x_t)                                   permutation test
+  T2/O2  sequential dep    mutual information I(x_t; x_{t+1})                 permutation test
+  O3     burstiness        gap between adjacent occurrences of same object     permutation test
+  O4     frequency pref    revisit target's historical visit count vs uniform  closed-form expectation
+  O5     recency pref      revisit target's recency rank vs uniform            closed-form expectation
 
-零假设：**episode 内置换**（保留该 episode 的成分与长度，只打乱顺序）。
-这正好隔离"倾向"（时序结构）与"词表小"（成分）两种解释。
-O4/O5 用闭式期望而非采样（踩坑 #15）。
+Null hypothesis: **within-episode permutation** (preserves the episode's composition and length,
+shuffles only the order). That precisely isolates "tendency" (temporal structure) from "small
+vocabulary" (composition) as competing explanations.
+O4/O5 use closed-form expectations rather than sampling (pitfall #15).
 """
 
 from __future__ import annotations
@@ -44,10 +46,10 @@ B = 2000
 SEED = 20260814
 
 
-# ---------------------------------------------------------------- 统计量
+# ---------------------------------------------------------------- statistics
 
 def self_repeat(seq: list) -> tuple[float, int]:
-    """紧邻重复率 P(x_{t+1} = x_t)。"""
+    """Adjacent repeat rate P(x_{t+1} = x_t)."""
     n = sum(1 for a, b in zip(seq, seq[1:]))
     if not n:
         return float("nan"), 0
@@ -55,7 +57,7 @@ def self_repeat(seq: list) -> tuple[float, int]:
 
 
 def reuse_rate(seq: list) -> tuple[float, int]:
-    """复用率 P(x_{t+1} ∈ {x_1..x_t})。**置换不变**，仅用于 O0 检查。"""
+    """Reuse rate P(x_{t+1} ∈ {x_1..x_t}). **Permutation invariant**, used only for the O0 check."""
     seen, hit, n = {seq[0]}, 0, 0
     for x in seq[1:]:
         n += 1
@@ -66,7 +68,7 @@ def reuse_rate(seq: list) -> tuple[float, int]:
 
 
 def mutual_info(seq: list) -> float:
-    """I(x_t; x_{t+1})，nat。度量超出边际分布的序列依赖。"""
+    """I(x_t; x_{t+1}), in nat. Measures sequential dependence beyond the marginal distribution."""
     pairs = list(zip(seq, seq[1:]))
     if not pairs:
         return 0.0
@@ -81,7 +83,7 @@ def mutual_info(seq: list) -> float:
 
 
 def mean_gap(seq: list) -> float | None:
-    """同一对象相邻两次出现的平均间隔。越小越"突发/聚集"。"""
+    """Mean gap between two adjacent occurrences of the same object. Smaller = more "bursty/clustered"."""
     pos: dict = defaultdict(list)
     for i, x in enumerate(seq):
         pos[x].append(i)
@@ -91,7 +93,7 @@ def mean_gap(seq: list) -> float | None:
 
 def perm_test(seq: list, stat_fn, n_perm: int = B, seed: int = SEED,
               alternative: str = "greater") -> dict:
-    """episode 内置换检验。返回观测值、零分布均值、p 值。"""
+    """Within-episode permutation test. Returns the observed value, null-distribution mean, and p-value."""
     obs = stat_fn(seq)
     if obs is None or (isinstance(obs, float) and math.isnan(obs)):
         return {"obs": None}
@@ -114,26 +116,26 @@ def perm_test(seq: list, stat_fn, n_perm: int = B, seed: int = SEED,
             "p": (ge + 1) / (len(null) + 1)}
 
 
-# ---------------------------------------------------------------- 闭式偏好
+# ---------------------------------------------------------------- closed-form preference
 
 def freq_recency_bias(seq: list) -> dict:
-    """重访事件上的高频/近期偏好，用**闭式期望**做零假设。
+    """Frequency/recency preference on revisit events, with a **closed-form expectation** as null.
 
-    每个重访事件（x_{t+1} ∈ seen_t）：
-      高频：目标的历史访问次数 c*  vs  均匀取一个 seen 对象的期望次数 E[c]
-      近期：目标的新近度排名 r*（1=最近访问过）vs 均匀期望 (m+1)/2
+    For every revisit event (x_{t+1} ∈ seen_t):
+      frequency: the target's historical visit count c*  vs  E[c] of a uniformly drawn seen object
+      recency:   the target's recency rank r* (1 = most recently visited) vs uniform expectation (m+1)/2
     """
     obs_c, exp_c, obs_r, exp_r, n = [], [], [], [], 0
     counts: Counter = Counter()
-    order: list = []            # 按最近访问排序（前=最近）
+    order: list = []            # sorted by most recent visit (front = most recent)
     for i, x in enumerate(seq):
         if i > 0 and counts and x in counts:
             n += 1
             m = len(counts)
             obs_c.append(counts[x])
-            exp_c.append(sum(counts.values()) / m)          # 均匀取一个 seen 的期望次数
+            exp_c.append(sum(counts.values()) / m)          # expected count of a uniformly drawn seen object
             obs_r.append(order.index(x) + 1)
-            exp_r.append((m + 1) / 2)                        # 均匀排名期望
+            exp_r.append((m + 1) / 2)                        # uniform rank expectation
         counts[x] += 1
         if x in order:
             order.remove(x)
@@ -151,13 +153,13 @@ def freq_recency_bias(seq: list) -> dict:
     }
 
 
-# ---------------------------------------------------------------- 汇总
+# ---------------------------------------------------------------- summary
 
 def agg(per_ep: list[dict], key: str) -> dict:
-    """跨 episode 汇总：对每 episode 的统计量做 episode 级 bootstrap。"""
+    """Cross-episode summary: episode-level bootstrap over each episode's statistic."""
     vals = [e[key] for e in per_ep if e.get(key) is not None]
     if not vals:
-        return {"note": "无样本"}
+        return {"note": "no samples"}
     rng = random.Random(SEED)
     pts = []
     for _ in range(B):
@@ -170,14 +172,14 @@ def agg(per_ep: list[dict], key: str) -> dict:
 
 
 def fisher_combine(ps: list[float]) -> dict:
-    """把每 episode 的置换 p 值合并（Fisher's method）。"""
+    """Combine the per-episode permutation p-values (Fisher's method)."""
     ps = [p for p in ps if p is not None and 0 < p <= 1]
     if not ps:
-        return {"note": "无 p 值"}
+        return {"note": "no p-values"}
     x2 = -2 * sum(math.log(p) for p in ps)
     df = 2 * len(ps)
-    # 卡方生存函数（df 偶数的闭式）：P = e^{-t}·Σ_{i<k} t^i/i!
-    # 直接算会溢出（k 达数百），故在**对数空间**用 log-sum-exp。
+    # chi-square survival function (closed form for even df): P = e^{-t}·Σ_{i<k} t^i/i!
+    # Computing it directly overflows (k reaches the hundreds), so use log-sum-exp in **log space**.
     k, t = df // 2, x2 / 2
     terms = [i * math.log(t) - math.lgamma(i + 1) for i in range(k)] if t > 0 else [0.0]
     mx = max(terms)
@@ -196,7 +198,7 @@ def main() -> int:
     args = ap.parse_args()
 
     eps = load_episodes(Path(args.runs_root), graph_only=False)
-    print(f"载入 {len(eps)} episode（不限已构图）")
+    print(f"loaded {len(eps)} episodes (not restricted to graph-built)")
 
     rows = []
     for e in eps:
@@ -207,7 +209,7 @@ def main() -> int:
         r: dict = {"id": e["id"], "n_steps": len(tools),
                    "n_tools_distinct": len(set(tools)),
                    "n_objs": len(objs), "n_objs_distinct": len(set(objs))}
-        # --- 工具 ---
+        # --- tools ---
         t1 = perm_test(tools, lambda s: self_repeat(s)[0])
         t2 = perm_test(tools, mutual_info)
         r["tool_selfrep"] = t1.get("obs")
@@ -218,7 +220,7 @@ def main() -> int:
         r["tool_mi_p"] = t2.get("p")
         r["tool_reuse"] = reuse_rate(tools)[0]
         r["tool_reuse_perm"] = perm_test(tools, lambda s: reuse_rate(s)[0]).get("null_sd")
-        # --- 对象 ---
+        # --- objects ---
         if len(objs) >= 4:
             o1 = perm_test(objs, lambda s: self_repeat(s)[0])
             o2 = perm_test(objs, mutual_info)
@@ -239,7 +241,7 @@ def main() -> int:
 
     res: dict = {
         "n_episodes": len(rows),
-        "note": "零假设=episode 内置换（保留成分与长度，打乱顺序），B=2000",
+        "note": "null hypothesis = within-episode permutation (preserves composition and length, shuffles order), B=2000",
         "O0_reuse_is_permutation_invariant": {
             "tool_reuse_null_sd_max": max((r.get("tool_reuse_perm") or 0)
                                           for r in rows),
@@ -247,7 +249,7 @@ def main() -> int:
                                          for r in rows),
             "tool_reuse_mean": agg(rows, "tool_reuse"),
             "obj_reuse_mean": agg(rows, "obj_reuse"),
-            "verdict": None,      # 下面填
+            "verdict": None,      # filled in below
         },
         "T1_tool_self_repeat": {"obs": agg(rows, "tool_selfrep"),
                                 "null": agg(rows, "tool_selfrep_null"),
@@ -280,30 +282,30 @@ def main() -> int:
     sd_max = max(res["O0_reuse_is_permutation_invariant"]["tool_reuse_null_sd_max"],
                  res["O0_reuse_is_permutation_invariant"]["obj_reuse_null_sd_max"])
     res["O0_reuse_is_permutation_invariant"]["verdict"] = (
-        f"置换零分布标准差最大 {sd_max:.2e} ⇒ 复用率确为置换不变量，"
-        f"不能作为『倾向』的证据" if sd_max < 1e-9 else
-        f"⚠️ 标准差 {sd_max:.2e} 非零，与理论不符，需检查实现")
+        f"max sd of the permutation null distribution {sd_max:.2e} ⇒ the reuse rate is indeed a permutation invariant, "
+        f"and cannot serve as evidence of a \"tendency\"" if sd_max < 1e-9 else
+        f"⚠️ sd {sd_max:.2e} is non-zero, contradicting theory, check the implementation")
 
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    # ---------------------------------------------------------- 打印
+    # ---------------------------------------------------------- print
     o0 = res["O0_reuse_is_permutation_invariant"]
-    print(f"\n=== O0 复用率是置换不变量（先排除算术假象）===")
-    print(f"  工具复用率 {o0['tool_reuse_mean']['mean']}  "
+    print(f"\n=== O0 the reuse rate is a permutation invariant (rule out the arithmetic artifact first) ===")
+    print(f"  tool reuse rate {o0['tool_reuse_mean']['mean']}  "
           f"CI{o0['tool_reuse_mean']['ci95']}")
-    print(f"  对象复用率 {o0['obj_reuse_mean']['mean']}  "
+    print(f"  object reuse rate {o0['obj_reuse_mean']['mean']}  "
           f"CI{o0['obj_reuse_mean']['ci95']}")
     print(f"  {o0['verdict']}")
 
-    print(f"\n=== 时序结构的置换检验（这些才是真『倾向』）===")
-    print(f"{'统计量':<22}{'观测':>9}{'零假设':>9}{'比值':>8}   合并 p")
+    print(f"\n=== permutation tests of temporal structure (these are the real \"tendencies\") ===")
+    print(f"{'statistic':<22}{'obs':>9}{'null':>9}{'ratio':>8}   combined p")
     for key, label, inv in (
-        ("T1_tool_self_repeat", "工具 紧邻重复", False),
-        ("T2_tool_mutual_info", "工具 互信息(nat)", False),
-        ("O1_obj_self_repeat", "对象 紧邻重复", False),
-        ("O2_obj_mutual_info", "对象 互信息(nat)", False),
-        ("O3_obj_burstiness_gap", "对象 平均间隔↓", True),
+        ("T1_tool_self_repeat", "tool adjacent repeat", False),
+        ("T2_tool_mutual_info", "tool MI (nat)", False),
+        ("O1_obj_self_repeat", "obj adjacent repeat", False),
+        ("O2_obj_mutual_info", "obj MI (nat)", False),
+        ("O3_obj_burstiness_gap", "obj mean gap ↓", True),
     ):
         d = res[key]
         o, nl = d["obs"].get("mean"), d["null"].get("mean")
@@ -312,17 +314,17 @@ def main() -> int:
         ratio = (nl / o if inv and o else (o / nl if nl else float("nan")))
         lp = d["perm"].get("log10_p_combined")
         ps = (f"1e{lp:.0f}" if lp is not None and lp < -3
-              else ("%.3g" % d["perm"]["p_combined"]) if lp is not None else "—")
+              else ("%.3g" % d["perm"]["p_combined"]) if lp is not None else "-")
         frac = d["perm"].get("frac_p_below_0.05")
         print(f"{label:<22}{o:>9.4f}{nl:>9.4f}{ratio:>8.2f}   {ps}"
-              f"   单ep显著率 {frac}   (n={d['obs']['n_episodes']} ep)")
-        print(f"{'':<22}观测 CI{d['obs']['ci95']}  零假设 CI{d['null']['ci95']}")
+              f"   per-ep signif. rate {frac}   (n={d['obs']['n_episodes']} ep)")
+        print(f"{'':<22}obs CI{d['obs']['ci95']}  null CI{d['null']['ci95']}")
 
-    print(f"\n=== 重访目标的选择偏好（闭式期望零假设）===")
+    print(f"\n=== selection preference among revisit targets (closed-form expectation as null) ===")
     o4, o5 = res["O4_frequency_bias"], res["O5_recency_bias"]
-    print(f"  高频偏好：目标历史访问次数 {o4['obs']['mean']} vs 均匀期望 "
+    print(f"  frequency preference: target's historical visit count {o4['obs']['mean']} vs uniform expectation "
           f"{o4['null']['mean']}   lift {o4['lift']['mean']} CI{o4['lift']['ci95']}")
-    print(f"  近期偏好：目标新近度排名 {o5['obs_rank']['mean']} vs 均匀期望 "
+    print(f"  recency preference: target's recency rank {o5['obs_rank']['mean']} vs uniform expectation "
           f"{o5['null_rank']['mean']}   lift {o5['lift']['mean']} CI{o5['lift']['ci95']}")
 
     print(f"\n→ {args.out}")

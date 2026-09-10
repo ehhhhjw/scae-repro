@@ -1,10 +1,10 @@
-"""文件定位任务：实例加载、prompt、结果判定。
+"""File localization task: instance loading, prompt, outcome scoring.
 
-数据
+Data
 ----
-instance_summary.csv 字段：instance_id, base_commit, problem_statement, patch_file
-patch_file 用 "\\n" 分隔多个 gold 文件（已核实：71/500 为多文件，最多 21 个）。
-仓库位于 <PROJECTS_ROOT>/<instance_id>，已 checkout 到 base_commit。
+instance_summary.csv fields: instance_id, base_commit, problem_statement, patch_file
+patch_file separates multiple gold files with "\\n" (verified: 71/500 are multi-file, at most 21).
+Repositories live at <PROJECTS_ROOT>/<instance_id>, already checked out to base_commit.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-# 数据集位置：默认指向仓库内 dataset/，可用环境变量覆盖指向本地 SWE-bench-Verified 快照。
-# 复现包本身不携带录制数据与仓库快照（见 REPRODUCE.md 第 1 步）。
+# Dataset location: defaults to dataset/ inside the repository; override via env var to point at a local SWE-bench-Verified snapshot.
+# The reproduction package itself ships neither recorded data nor repository snapshots (see REPRODUCE.md step 1).
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 CSV_PATH = Path(
@@ -41,7 +41,7 @@ class Instance:
 
     @property
     def project(self) -> str:
-        """repo 家族，用于 leave-one-repo-out 分层。"""
+        """repo family, used for leave-one-repo-out stratification."""
         return self.instance_id.split("__")[0]
 
 
@@ -74,9 +74,11 @@ def norm_path(p: str) -> str:
 # Prompt
 # ---------------------------------------------------------------------------
 
-# base_instructions：收窄工具面 + 固定输出格式。
-# 注意：这是 S0 的 [V2] 待验证项 —— 我们只能"要求"，能否真正抑制内置 shell 需实测。
-# 违规调用不删不藏，一律记录并在论文里报告违规率。
+# base_instructions: narrow the tool surface + fix the output format.
+# Note: this is S0's [V2] open item -- we can only "request" it; whether the built-in shell
+# is really suppressed has to be measured.
+# Violating calls are neither dropped nor hidden: all are logged and the violation rate is
+# reported in the paper.
 BASE_INSTRUCTIONS = """\
 You are a code localization agent. Your ONLY task is to identify which file(s) in the \
 repository must be modified to resolve the issue described by the user.
@@ -109,8 +111,9 @@ Resolve the following issue by identifying the file(s) that must be modified.
 Search and read the repository as needed, then emit the <answer> block.
 """
 
-# fork 之后用于推进的续跑语。必须在所有 arm 中逐字一致，
-# 否则它本身就成了一个干预，会污染 Δ_t 的估计。
+# Continuation utterance used to advance after a fork. It must be verbatim identical
+# across all arms, otherwise it becomes an intervention itself and contaminates the
+# estimate of Δ_t.
 CONTINUE_PROMPT = "Continue."
 
 
@@ -119,14 +122,14 @@ def build_prompt(inst: Instance) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 结果判定
+# Outcome scoring
 # ---------------------------------------------------------------------------
 
 _ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
 
 
 def parse_answer(text: str) -> frozenset[str] | None:
-    """取最后一个 <answer> 块。返回 None 表示 agent 没有按格式作答。"""
+    """Take the last <answer> block. None means the agent did not answer in the required format."""
     matches = _ANSWER_RE.findall(text or "")
     if not matches:
         return None
@@ -136,8 +139,8 @@ def parse_answer(text: str) -> frozenset[str] | None:
     return frozenset(paths)
 
 
-# 非源文件模式：SWE-bench 的 gold patch 通常只含源文件，不含 test/docs。
-# agent 常合理地把 test 也报出来，因此主口径用 recall（gold ⊆ answer）。
+# Non-source file patterns: SWE-bench gold patches usually contain only source files, no test/docs.
+# The agent often reasonably reports tests as well, so the primary definition uses recall (gold ⊆ answer).
 _NONSOURCE_RE = re.compile(
     r"(^|/)(tests?|testing|docs?|doc)/|(^|/)test_[^/]+\.py$|_test\.py$|\.(rst|md|txt)$",
     re.IGNORECASE,
@@ -149,12 +152,12 @@ def _filter_source(paths: frozenset[str]) -> frozenset[str]:
 
 
 def outcome(pred: frozenset[str] | None, gold: frozenset[str]) -> dict:
-    """主口径 Y = (gold ⊆ pred)，即 recall==1（找全所有 gold 源文件即算成功）。
+    """Primary definition Y = (gold ⊆ pred), i.e. recall==1 (finding every gold source file counts as success).
 
-    附带两个敏感性口径：
-      Y_exact    = 严格集合相等
-      Y_filtered = 过滤掉 pred 中的 test/docs 后再严格相等
-    以及 precision/recall/f1 供细粒度分析。
+    Plus two sensitivity definitions:
+      Y_exact    = strict set equality
+      Y_filtered = strict equality after filtering test/docs out of pred
+    and precision/recall/f1 for fine-grained analysis.
     """
     if pred is None:
         return {"Y": 0, "Y_exact": 0, "Y_filtered": 0,
@@ -165,7 +168,7 @@ def outcome(pred: frozenset[str] | None, gold: frozenset[str]) -> dict:
     f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0
     pred_src = _filter_source(pred)
     return {
-        "Y": int(gold <= pred),                       # 主口径：recall == 1
+        "Y": int(gold <= pred),                       # primary definition: recall == 1
         "Y_exact": int(pred == gold),
         "Y_filtered": int(pred_src == gold or gold <= pred_src),
         "f1": f1,
@@ -176,12 +179,13 @@ def outcome(pred: frozenset[str] | None, gold: frozenset[str]) -> dict:
 
 
 def file_hit(pred: frozenset[str] | None, target: str) -> int:
-    """per-file 命中指示 Y_f = 1[target ∈ pred]。
+    """per-file hit indicator Y_f = 1[target ∈ pred].
 
-    pilot 实测（20样本）：单文件任务 100% 全对，失败全部集中在多文件任务
-    （recall=0.5，找到一个漏一个）。二元 Y 信号太稀疏，故把归因目标细化到
-    单个 gold 文件：问"哪一步决定了文件 f 是否被定位到"。
-    Theorem 1 的可加分解对每个 f 独立成立（Y_f 也是二元结果）。
+    Measured in the pilot (20 samples): single-file tasks are 100% correct, failures are entirely
+    concentrated in multi-file tasks (recall=0.5, one found and one missed). The binary Y signal
+    is too sparse, so the attribution target is refined down to a single gold file: asking
+    "which step decided whether file f got localized".
+    Theorem 1's additive decomposition holds independently for each f (Y_f is binary too).
     """
     if pred is None:
         return 0
@@ -189,17 +193,18 @@ def file_hit(pred: frozenset[str] | None, target: str) -> int:
 
 
 def missed_files(pred: frozenset[str] | None, gold: frozenset[str]) -> list[str]:
-    """被漏掉的 gold 文件 —— 最强的负向归因信号来源。"""
+    """Missed gold files -- the strongest source of negative attribution signal."""
     if pred is None:
         return sorted(gold)
     return sorted(gold - pred)
 
 
 def final_message_text(items: list[dict]) -> str:
-    """从 turn_run 返回的 item/completed 通知列表里拼出 agent 的最终文本。
+    """Assemble the agent's final text from the item/completed notification list returned by turn_run.
 
-    通知字段结构随 codex 版本变化，这里尽量宽松地捞所有可能的文本载荷。
-    更可靠的路径是 answer_from_rollout()（直接读 rollout 文件）。
+    The notification field layout varies across codex versions, so this scrapes every plausible
+    text payload as loosely as possible. The more reliable path is answer_from_rollout()
+    (which reads the rollout file directly).
     """
     chunks: list[str] = []
     for p in items:
@@ -218,9 +223,10 @@ def final_message_text(items: list[dict]) -> str:
 
 
 def answer_from_rollout(rollout_items: list[dict]) -> frozenset[str] | None:
-    """从 rollout JSONL 直接解析最终 <answer>。比 final_message_text 可靠。
+    """Parse the final <answer> straight from the rollout JSONL. More reliable than final_message_text.
 
-    取所有 assistant message 的文本拼起来，再用 parse_answer 取最后一个 <answer> 块。
+    Concatenates the text of all assistant messages, then uses parse_answer to take the last
+    <answer> block.
     """
     chunks: list[str] = []
     for it in rollout_items:
@@ -240,7 +246,7 @@ def answer_from_rollout(rollout_items: list[dict]) -> frozenset[str] | None:
 
 
 # ---------------------------------------------------------------------------
-# 仓库前置检查
+# Repository preflight checks
 # ---------------------------------------------------------------------------
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -251,18 +257,19 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
 
 
 def reset_repo(inst: Instance) -> dict:
-    """把仓库强制回到干净的 base_commit。
+    """Force the repository back to a clean base_commit.
 
-    数据集现状（已核实）：499 个仓库工作区都叠着 gold patch（=已修复状态），
-    还带 procbench-* 的 stash。定位任务必须跑在 buggy 的 base_commit 上，
-    否则 agent 会读到已修复代码 = 泄题。
+    Dataset state as shipped (verified): all 499 repository worktrees have the gold patch applied
+    (= already-fixed state), plus a procbench-* stash. The localization task must run on the buggy
+    base_commit, otherwise the agent reads already-fixed code = answer leakage.
 
-    做法：checkout base_commit（分离 HEAD）→ 丢弃工作区改动 → 清未跟踪文件。
-    不动 stash（它们与工作区改动同源，是 gold patch，可从 SWE-bench 再生）。
+    Procedure: checkout base_commit (detached HEAD) → discard worktree changes → clean untracked files.
+    Stashes are left alone (same origin as the worktree changes, they are the gold patch, and can be
+    regenerated from SWE-bench).
     """
     repo = inst.repo
     if not repo.is_dir():
-        return {"ok": False, "reason": f"仓库不存在: {repo}"}
+        return {"ok": False, "reason": f"repository does not exist: {repo}"}
     _git(repo, "checkout", "-f", inst.base_commit)
     _git(repo, "reset", "--hard", inst.base_commit)
     _git(repo, "clean", "-fdq")
@@ -270,13 +277,14 @@ def reset_repo(inst: Instance) -> dict:
 
 
 def check_repo(inst: Instance) -> dict:
-    """跑任务前必须通过：仓库存在、工作区干净、HEAD 就是 base_commit。
+    """Must pass before running a task: repository exists, worktree clean, HEAD is base_commit.
 
-    任何一条不满足都会让重放不可比（agent 会看到上一次运行留下的痕迹）。
+    Violating any one of these makes replays incomparable (the agent would see traces left by the
+    previous run).
     """
     repo = inst.repo
     if not repo.is_dir():
-        return {"ok": False, "reason": f"仓库不存在: {repo}"}
+        return {"ok": False, "reason": f"repository does not exist: {repo}"}
     dirty = _git(repo, "status", "--porcelain").stdout.strip()
     head = _git(repo, "rev-parse", "HEAD").stdout.strip()
     ok = not dirty and head.startswith(inst.base_commit[:10])
@@ -285,10 +293,10 @@ def check_repo(inst: Instance) -> dict:
         "dirty": bool(dirty),
         "head": head,
         "expected": inst.base_commit,
-        "reason": "" if ok else ("工作区不干净" if dirty else f"HEAD={head} != base_commit"),
+        "reason": "" if ok else ("worktree not clean" if dirty else f"HEAD={head} != base_commit"),
     }
 
 
 def n_py_files(inst: Instance) -> int:
-    """仓库规模的粗代理，用于难度分层与 U_task 特征。"""
+    """Coarse proxy for repository size, used for difficulty stratification and the U_task feature."""
     return sum(1 for _ in inst.repo.rglob("*.py"))

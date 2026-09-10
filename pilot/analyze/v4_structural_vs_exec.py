@@ -1,28 +1,33 @@
-"""V4（核心实验）：结构不确定性能否预测执行不确定性？
+"""V4 (core experiment): can structural uncertainty predict execution uncertainty?
 
-命题
-----
+Proposition
+-----------
     corr( α·U^tool_t + β·U^obj_t ,  U^exec_t )
 
-U^tool  通道 A：工具转移分布的条件熵（零 API，已有 tool_model 产出）
-U^obj   通道 B：代码图三层候选分布的熵（零 API，已有 code_channel）
-U^exec  fork-replay 的结果方差（**昂贵**，已有 349 个估值段）
+U^tool  channel A: conditional entropy of the tool transition distribution (zero API, already produced by tool_model)
+U^obj   channel B: entropy of the three-layer candidate distribution over the code graph (zero API, already produced by code_channel)
+U^exec  outcome variance from fork-replay (**expensive**, 349 valuation segments already available)
 
-为何这个命题能成（而前四次预测全败）
-----------------------------------
-U^exec 是**重放方差**而非成败标签。前四次失败的根因是 94% 成功率下仅 30 个失败样本，
-判别边界学不出来；而重放方差每个估值段都有、且连续取值，样本量是 349 而非 30。
+Why this proposition can succeed (while the previous four predictions all failed)
+---------------------------------------------------------------------------------
+U^exec is **replay variance**, not a success/failure label. The four earlier failures
+were rooted in only 30 failure samples under a 94% success rate, so no discriminative
+boundary could be learned; replay variance exists for every valuation segment and is
+continuous-valued, giving n=349 instead of 30.
 
-若命题成立 → 可用零成本结构量代理昂贵重放，这是有实用价值的主结论。
-若不成立 → 说明结构与执行不确定性解耦，即"必须重放，不能省"，同样是重要结论。
-两档都可写。
+If the proposition holds -> zero-cost structural quantities can proxy for expensive
+replay, which is a main conclusion with practical value.
+If it does not hold -> structural and execution uncertainty are decoupled, i.e. "replay
+is mandatory, it cannot be skipped", which is equally an important conclusion.
+Either outcome is publishable.
 
-U^exec 的定义
-------------
-每个估值段有 m 次重放的 recall 值。由 causal_segments 只存了 delta，
-故用**相邻段 v̂ 的变化幅度**作为该点执行不确定性的代理：
-    U^exec_t = 4 * v̂_t * (1 - v̂_t)      （Bernoulli 方差归一到 [0,1]）
-v̂_t 由 causal_v0 + 累加 delta 还原。v̂=0.5 时最大，v̂∈{0,1} 时为 0。
+Definition of U^exec
+--------------------
+Each valuation segment has m replayed recall values. Since causal_segments only stores
+delta, we use the **magnitude of change in v̂ between adjacent segments** as a proxy
+for execution uncertainty at that point:
+    U^exec_t = 4 * v̂_t * (1 - v̂_t)      (Bernoulli variance normalized to [0,1])
+v̂_t is reconstructed from causal_v0 plus the cumulative deltas. Maximal at v̂=0.5, zero at v̂ in {0,1}.
 """
 
 from __future__ import annotations
@@ -110,7 +115,7 @@ def build_rows(attr_path: Path, locate_path: Path, runs_root: Path,
             r = json.loads(line)
             loc[r["instance_id"]] = r
 
-    # U^tool：从 tool_model 的 entropy_rows 建 (instance, t) -> H_tool
+    # U^tool: build (instance, t) -> H_tool from tool_model's entropy_rows
     htool: dict[tuple[str, int], float] = {}
     if tool_ent_path.exists():
         d = json.loads(tool_ent_path.read_text())
@@ -143,7 +148,7 @@ def build_rows(attr_path: Path, locate_path: Path, runs_root: Path,
             p = parse_step(steps[t - 1])
             uo = g.u_obj_resolved(p.path or p.obj) if g.ok else {"H": None}
             ut = htool.get((iid, t))
-            u_exec = 4.0 * v * (1.0 - v)          # Bernoulli 方差归一
+            u_exec = 4.0 * v * (1.0 - v)          # Bernoulli variance, normalized
             rows.append({
                 "instance_id": iid, "project": rec.get("project"),
                 "Y": rec.get("Y"), "t": t, "n_steps": len(steps),
@@ -166,7 +171,7 @@ def main() -> int:
 
     rows = build_rows(Path(args.attr), Path(args.locate),
                       Path(args.runs_root), Path(args.tool_ent))
-    print(f"构造 {len(rows)} 个 (instance, t) 观测点")
+    print(f"built {len(rows)} (instance, t) observation points")
 
     def pairs(key):
         xs, ys = [], []
@@ -180,7 +185,7 @@ def main() -> int:
     for key in ("U_tool", "U_obj"):
         xs, ys = pairs(key)
         if len(xs) < 10:
-            res["correlations"][key] = {"n": len(xs), "note": "样本不足"}
+            res["correlations"][key] = {"n": len(xs), "note": "insufficient samples"}
             continue
         rho = spearman(xs, ys)
         res["correlations"][key] = {
@@ -190,7 +195,7 @@ def main() -> int:
             "mean_y": round(statistics.mean(ys), 4),
         }
 
-    # 组合：等权 z-score 相加（α=β=1，不调参以免过拟合）
+    # Combination: sum of equally weighted z-scores (α=β=1, untuned to avoid overfitting)
     both = [r for r in rows if r.get("U_tool") is not None
             and r.get("U_obj") is not None and r.get("U_exec") is not None]
     if len(both) >= 10:
@@ -203,10 +208,10 @@ def main() -> int:
             "n": len(both),
             "spearman": round(rho, 4) if rho is not None else None,
             "ci95": boot_ci_rho(z.tolist(), ue),
-            "note": "等权 z-score 组合，未调参",
+            "note": "equally weighted z-score combination, untuned",
         }
 
-    # 分层：按是否在图中、按成败
+    # Stratification: by in-graph membership, by success/failure
     strat = {}
     for name, sub in (("in_graph", [r for r in rows if r.get("in_graph")]),
                       ("succeeded", [r for r in rows if r.get("Y") == 1]),
@@ -228,15 +233,15 @@ def main() -> int:
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    print(f"\n=== V4 结构不确定性 ↔ 执行不确定性 ===")
-    print(f"覆盖: {res['coverage']}")
-    print(f"\n{'量':<22}{'n':>6}{'Spearman':>11}{'CI95':>22}")
+    print(f"\n=== V4 structural uncertainty ↔ execution uncertainty ===")
+    print(f"coverage: {res['coverage']}")
+    print(f"\n{'quantity':<22}{'n':>6}{'Spearman':>11}{'CI95':>22}")
     for k, c in res["correlations"].items():
         if "note" in c and "spearman" not in c:
             print(f"{k:<22}{c['n']:>6}  {c['note']}")
             continue
         print(f"{k:<22}{c['n']:>6}{str(c['spearman']):>11}{str(c['ci95']):>22}")
-    print("\n分层（U_obj vs U_exec）:")
+    print("\nstratified (U_obj vs U_exec):")
     for k, c in strat.items():
         print(f"  {k:<12} n={c['n']:<5} rho={c['spearman_Uobj']} CI={c['ci95']}")
     print(f"\n→ {args.out}")

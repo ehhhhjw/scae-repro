@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""UQ 自检：在**已知生成过程**上验证 Laplace 后验与三分解的行为是否正确。
+"""UQ self-check: verify on a **known generative process** that the Laplace posterior and the three-way decomposition behave correctly.
 
-为什么需要它
-------------
-论文对 v0 报了两件不同的事，必须分开验证：
-  (a) 我们的贝叶斯机制是否产出行为正确的后验 —— 只能在已知真值的合成数据上检验；
-  (b) 手工前置协变量能否预测真实仓库上的定位成功 —— 这是 LORO 实验（结论为负）。
-本脚本只做 (a)。它不碰真实语料，不调任何 API。
+Why it is needed
+----------------
+The paper reports two different things about v0, which must be verified separately:
+  (a) whether our Bayesian machinery yields a behaviourally correct posterior -- only testable on synthetic data with known truth;
+  (b) whether hand-built pre-step covariates predict localization success on real repositories -- that is the LORO experiment (negative result).
+This script only does (a). It does not touch the real corpus and calls no API.
 
-判据（epistemic 项的决定性检验）
---------------------------------
-把协变量推到训练支撑之外，U_model 必须显著上升。若不上升，说明 Laplace 后验只是
-在重新缩放概率，而没有真正传播参数不确定性 —— 那么 U_model 不配叫 epistemic。
+Criterion (decisive test for the epistemic term)
+------------------------------------------------
+Push the covariates outside the training support and U_model must rise significantly. If it does not, the Laplace
+posterior is merely rescaling probabilities without actually propagating parameter uncertainty -- then U_model does not deserve the name epistemic.
 
-用法
-----
+Usage
+-----
     python3 -m pilot.analyze.uq_selftest --out pilot/runs/uq_selftest.json
 """
 
@@ -42,15 +42,15 @@ def main() -> int:
     ap.add_argument("--n-test", type=int, default=200)
     ap.add_argument("--d", type=int, default=5)
     ap.add_argument("--k-rollouts", type=int, default=4,
-                    help="每个测试点的重复 rollout 次数，用于经验估计 U_policy")
+                    help="repeat rollouts per test point, used to empirically estimate U_policy")
     ap.add_argument("--ood-scale", type=float, default=5.0,
-                    help="把协变量推离训练支撑的倍数")
+                    help="factor by which the covariates are pushed off the training support")
     args = ap.parse_args()
 
     rng = np.random.default_rng(SEED)
     d = args.d
 
-    # ---- 已知生成过程 ----
+    # ---- known generative process ----
     w_true = rng.normal(0.0, 1.0, size=d)
     X_tr = rng.normal(0.0, 1.0, size=(args.n_train, d))
     p_tr = 1.0 / (1.0 + np.exp(-(X_tr @ w_true)))
@@ -61,19 +61,19 @@ def main() -> int:
 
     model = BayesianLogisticLaplace(l2=1.0).fit(X_tr, y_tr)
 
-    # ---- 参数恢复：MAP 与真值的相关（机制是否学到东西）----
+    # ---- parameter recovery: correlation of MAP with truth (did the machinery learn anything) ----
     w_hat = model.w
     w_corr = float(np.corrcoef(w_true, w_hat)[0, 1])
 
-    # ---- 支撑内：三分解 ----
+    # ---- in support: three-way decomposition ----
     p_in = model.predict_proba(X_te)
     ev_in = model.epistemic_var(X_te)
-    # U_policy：同一任务 K 次 rollout 的结果方差（用真 p 模拟重复 rollout）
+    # U_policy: outcome variance over K rollouts of the same task (repeats simulated with the true p)
     draws = (rng.random((args.k_rollouts, args.n_test)) < p_te_true).astype(float)
     policy_var = draws.var(axis=0, ddof=1)
     dec_in = decompose_uncertainty(p_in, ev_in, policy_var=policy_var)
 
-    # ---- 支撑外：epistemic 必须上升 ----
+    # ---- out of support: epistemic must rise ----
     X_ood = X_te * args.ood_scale
     p_ood = model.predict_proba(X_ood)
     ev_ood = model.epistemic_var(X_ood)
@@ -82,7 +82,7 @@ def main() -> int:
     um_in = float(dec_in["U_model"].mean())
     um_ood = float(dec_ood["U_model"].mean())
 
-    # 校准（支撑内，对真 p 而非标签，避免有限样本噪声主导）
+    # calibration (in support, against the true p rather than labels, to avoid finite-sample noise dominating)
     mae_p = float(np.abs(p_in - p_te_true).mean())
 
     res = {
@@ -107,22 +107,22 @@ def main() -> int:
             "U_model_out_of_support": round(um_ood, 4),
             "ratio": round(um_ood / um_in, 3) if um_in > 0 else None,
             "pass": bool(um_ood > 2.0 * um_in),
-            "criterion": "支撑外 U_model > 2x 支撑内 U_model",
+            "criterion": "out-of-support U_model > 2x in-support U_model",
         },
     }
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print("=== UQ 自检（已知生成过程）===")
+    print("=== UQ self-check (known generative process) ===")
     pr = res["parameter_recovery"]
-    print(f"参数恢复 corr(w_true, MAP) = {pr['corr_w_true_vs_map']}  "
-          f"支撑内概率 MAE = {pr['mean_abs_prob_error_in_support']}")
+    print(f"parameter recovery corr(w_true, MAP) = {pr['corr_w_true_vs_map']}  "
+          f"in-support probability MAE = {pr['mean_abs_prob_error_in_support']}")
     dd = res["in_support_decomposition"]
-    print(f"预测熵 {dd['predictive_entropy']} = U_task {dd['U_task']} "
+    print(f"predictive entropy {dd['predictive_entropy']} = U_task {dd['U_task']} "
           f"+ U_policy {dd['U_policy']} + U_model {dd['U_model']}")
     ei = res["epistemic_inflation_test"]
-    print(f"epistemic 膨胀检验: {ei['U_model_in_support']} -> "
+    print(f"epistemic inflation test: {ei['U_model_in_support']} -> "
           f"{ei['U_model_out_of_support']} (x{ei['ratio']})  pass={ei['pass']}")
     print(f"-> {out}")
     return 0

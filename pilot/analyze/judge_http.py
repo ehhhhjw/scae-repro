@@ -1,19 +1,19 @@
-"""直连 HTTP 的 judge —— 绕过 codex，因为 judge 本不需要 agent 运行时。
+"""Direct-HTTP judge -- bypasses codex, because the judge does not need an agent runtime at all.
 
-为什么需要它
-------------
-codex 0.145 只支持 `wire_api = "responses"`（`chat` 已被移除），而该端点上的
-qwen 系列在 `/responses` 上流式返回会中途断连：实测 5 次重连后 turn 以
-`status=failed` 结束、token 用量为 0，**且这发生在等满 60 分钟速率窗口之后**，
-所以不是速率限制。而 `/chat/completions` 对同一模型返回 200。
+Why it is needed
+----------------
+codex 0.145 only supports `wire_api = "responses"` (`chat` was removed), and on that endpoint the
+qwen family disconnects mid-stream when streaming over `/responses`: measured, after 5 reconnects the
+turn ends with `status=failed` and zero token usage, **and this happens after waiting out the full
+60-minute rate window**, so it is not rate limiting. Whereas `/chat/completions` returns 200 for the same model.
 
-judge 是纯文本进、纯文本出：不用工具、不用沙箱、不碰仓库。用 codex 只是当初的
-便利选择。直连 `/chat/completions` 就绕开了整个不兼容。
+The judge is pure text in, pure text out: no tools, no sandbox, no repository. Using codex was merely
+the original convenience choice. Connecting directly to `/chat/completions` sidesteps the whole incompatibility.
 
-**提示词与原实验逐字一致**：复用 `pilot.attribution.judge` 的
-`JUDGE_INSTRUCTIONS` / `render_trace` / `_parse_judge`，system 位放 instructions、
-user 位放 prompt —— 这是原来 `base_instructions` + turn 输入的忠实翻译。
-若提示词不一致，跨模型对比就无意义。
+**Prompts are verbatim identical to the original experiment**: reuse `pilot.attribution.judge`'s
+`JUDGE_INSTRUCTIONS` / `render_trace` / `_parse_judge`, with instructions in the system slot and
+prompt in the user slot -- a faithful translation of the original `base_instructions` + turn input.
+If the prompts differed, cross-model comparison would be meaningless.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ BASE_URL = os.environ.get(
 
 def build_prompt(base_items: list[dict], inst: T.Instance, outcome_Y: int,
                  mode: str, prefix_upto: int | None) -> tuple[str, str, int]:
-    """返回 (system_instructions, user_prompt, n_steps)，与原实验同构。"""
+    """Return (system_instructions, user_prompt, n_steps), structurally identical to the original experiment."""
     steps = R.steps(base_items)
     n = len(steps)
     if mode == "full":
@@ -62,7 +62,7 @@ def build_prompt(base_items: list[dict], inst: T.Instance, outcome_Y: int,
 
 def chat_once(model: str, system: str, user: str, *, timeout: float = 180.0,
               max_tokens: int = 2048, temperature: float | None = None) -> dict:
-    """一次 /chat/completions 调用。返回 {ok, text, status, error, raw_head}。"""
+    """A single /chat/completions call. Returns {ok, text, status, error, raw_head}."""
     key = os.environ.get("IDEALAB_API_KEY")
     if not key:
         return {"ok": False, "error": "IDEALAB_API_KEY not set"}
@@ -102,7 +102,7 @@ def chat_once(model: str, system: str, user: str, *, timeout: float = 180.0,
         return {"ok": False, "status": status,
                 "error": "unexpected response shape",
                 "raw_head": json.dumps(payload, ensure_ascii=False)[:300]}
-    # qwen 把思维链放在 reasoning_content，答案在 content；两者都取，以 content 为主
+    # qwen puts the chain of thought in reasoning_content and the answer in content; take both, content primary
     text = (msg.get("content") or "").strip()
     reasoning = (msg.get("reasoning_content") or "").strip()
     return {"ok": True, "status": status, "text": text,
@@ -114,7 +114,7 @@ def judge_http(base_items: list[dict], inst: T.Instance, outcome_Y: int,
                model: str, mode: str = "full",
                prefix_upto: int | None = None,
                timeout: float = 180.0) -> dict:
-    """直连版 judge 归因，返回结构与 `judge.judge_attribution` 一致。"""
+    """Direct-connection variant of judge attribution; return structure matches `judge.judge_attribution`."""
     instr, prompt, n = build_prompt(base_items, inst, outcome_Y, mode, prefix_upto)
     if n == 0:
         return {"mode": mode, "n_steps": 0, "parsed": False, "raw": ""}
@@ -123,7 +123,7 @@ def judge_http(base_items: list[dict], inst: T.Instance, outcome_Y: int,
         return {"mode": mode, "n_steps": n, "parsed": False,
                 "error": res.get("error"), "status": res.get("status")}
     text = res["text"]
-    # 若答案被 finish_reason=length 截断，JSON 可能不完整；如实记录
+    # if the answer was truncated by finish_reason=length the JSON may be incomplete; record it faithfully
     parsed = _parse_judge(text, n)
     if parsed is None:
         return {"mode": mode, "n_steps": n, "parsed": False,

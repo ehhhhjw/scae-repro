@@ -1,29 +1,36 @@
-"""仓库 AST 索引 —— 把执行过程从「行为空间」搬到「语义空间」。
+"""Repository AST index -- moves execution out of "behavior space" into "semantic space".
 
-动机
-----
-前三次预测尝试（v0 / anytime / next-step）全部失败，根因同一个：所有特征都是
-行为表层统计（步数、搜索占比、重复率），只知道 agent「动了多少」，不知道
-「动对没动对」；动作桶用字符串路径，跨 repo 不可迁移（候选覆盖率仅 48%）。
+Motivation
+----------
+The first three prediction attempts (v0 / anytime / next-step) all failed for the
+same root cause: every feature was a surface behavioral statistic (step count,
+search fraction, repeat rate), so we only knew "how much" the agent moved, not
+"whether it moved to the right place"; action buckets keyed on string paths do
+not transfer across repos (candidate coverage only 48%).
 
-AST 提供语义坐标系，补上三样缺失的东西：
-  1. U_task 可直接测量：issue 提到的符号在仓库里有多少定义点、是否分散
-  2. 动作可定位到依赖图节点 → 替代动作有合理来源（一跳邻居），跨 repo 可迁移
-  3. 归因可下降到符号级 → 回答「哪一块内容」而非只到「哪一步」
+The AST supplies a semantic coordinate system, filling in the three missing pieces:
+  1. U_task becomes directly measurable: how many definition sites the symbols
+     mentioned in the issue have in the repo, and whether they are scattered
+  2. Actions can be localized to dependency-graph nodes -> alternative actions
+     have a principled source (one-hop neighbors) and transfer across repos
+  3. Attribution can descend to the symbol level -> answers "which piece of
+     content" instead of only "which step"
 
-为什么用内置 ast 而非 tree-sitter
----------------------------------
-语料 499 个仓库全为 Python；内置 ast 给出等价的符号与依赖信息，且零外部依赖
-（本环境未装 tree-sitter，且 rg 也不可用——见 scae_pitfalls）。接口按语言无关
-方式设计，换 tree-sitter 只需替换 parse_file。
+Why the builtin ast rather than tree-sitter
+-------------------------------------------
+All 499 repos in the corpus are Python; the builtin ast yields equivalent symbol
+and dependency information with zero external dependencies (tree-sitter is not
+installed in this environment, and rg is unavailable too -- see scae_pitfalls).
+The interface is designed to be language-agnostic; switching to tree-sitter only
+requires replacing parse_file.
 
-产出
-----
+Outputs
+-------
 RepoIndex:
-  symbols:  name -> [(file, kind, lineno)]        符号定义点（含重名，重名即歧义）
-  imports:  file -> set(module)                   文件级依赖
-  file_syms: file -> set(name)                    文件定义的符号
-  edges:    file -> set(file)                     由 import 解析出的文件级依赖边
+  symbols:  name -> [(file, kind, lineno)]        definition sites (duplicate names = ambiguity)
+  imports:  file -> set(module)                   file-level dependencies
+  file_syms: file -> set(name)                    symbols defined by the file
+  edges:    file -> set(file)                     file-level dependency edges resolved from imports
 """
 
 from __future__ import annotations
@@ -49,19 +56,19 @@ class RepoIndex:
     n_files: int = 0
     n_parse_fail: int = 0
 
-    # ---------------- 查询接口（供 UQ / 归因使用）----------------
+    # ---------------- Query interface (for UQ / attribution)----------------
 
     def definition_sites(self, name: str) -> list[tuple[str, str, int]]:
-        """符号的所有定义点。len>1 即存在重名歧义。"""
+        """All definition sites of a symbol. len>1 means duplicate-name ambiguity."""
         return self.symbols.get(name, [])
 
     def ambiguity(self, names: list[str]) -> dict:
-        """一组符号的歧义度 —— U_task 的直接测量，而非残差倒推。
+        """Ambiguity of a symbol set -- a direct measurement of U_task, not a residual inversion.
 
-        n_defsites   总定义点数
-        max_fanout   单个符号最多在几个文件里被定义（重名程度）
-        n_files_hit  这些符号一共散落在多少个文件
-        spread       命中文件在目录层面的分散度（不同顶层包数）
+        n_defsites   total number of definition sites
+        max_fanout   max number of files a single symbol is defined in (degree of name duplication)
+        n_files_hit  how many files these symbols are scattered across in total
+        spread       directory-level dispersion of the hit files (number of distinct top-level packages)
         """
         sites, files = 0, set()
         fanout = 0
@@ -77,7 +84,7 @@ class RepoIndex:
                 "n_files_hit": len(files), "spread": len(tops)}
 
     def neighbors(self, file: str, hops: int = 1) -> set[str]:
-        """依赖图上的 k 跳邻居 —— 替代动作 a' 的合理来源。"""
+        """k-hop neighbors on the dependency graph -- a principled source for alternative actions a'."""
         frontier, seen = {file}, {file}
         for _ in range(hops):
             nxt: set[str] = set()
@@ -92,7 +99,7 @@ class RepoIndex:
         return seen - {file}
 
     def graph_distance(self, a: str, b: str, max_hops: int = 4) -> int | None:
-        """两文件在依赖图上的最短跳数；None 表示 max_hops 内不连通。"""
+        """Shortest hop count between two files on the dependency graph; None = not connected within max_hops."""
         if a == b:
             return 0
         frontier, seen = {a}, {a}
@@ -112,12 +119,12 @@ class RepoIndex:
 
 
 def _mod_to_file(mod: str, root: Path, all_files: set[str]) -> str | None:
-    """把 import 的模块名解析为仓库内文件路径（尽力而为）。"""
+    """Resolve an imported module name to a file path inside the repo (best effort)."""
     p = mod.replace(".", "/")
     for cand in (f"{p}.py", f"{p}/__init__.py"):
         if cand in all_files:
             return cand
-    # 尾段匹配：a.b.c -> 任何 .../c.py
+    # Tail match: a.b.c -> any .../c.py
     tail = mod.rsplit(".", 1)[-1]
     hits = [f for f in all_files
             if f.endswith(f"/{tail}.py") or f == f"{tail}.py"]

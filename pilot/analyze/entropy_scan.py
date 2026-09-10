@@ -1,10 +1,10 @@
-"""汇总 V5 多任务熵扫描 → 验证"早高后低"熵衰减是否普遍（支撑混合估计器动机）。
+"""Summarize the V5 multi-task entropy scan → check whether "high early, low late" entropy decay is general (supports the hybrid-estimator motivation).
 
-读 pilot/runs/v5_scan/*/v5_report.json，把每个 fork 点的 (归一步位, 熵, positivity)
-聚合，输出：
-  - 每任务的 熵 vs 步位 序列
-  - 跨任务：高熵步占比、熵与步位的 Spearman 相关（负相关=早高后低）
-  - positivity 成立的步位分布（高熵步集中在早期？）
+Reads pilot/runs/v5_scan/*/v5_report.json, aggregates (normalized step position, entropy, positivity)
+for every fork point, and outputs:
+  - per-task entropy vs step-position series
+  - across tasks: fraction of high-entropy steps, Spearman correlation of entropy with step position (negative = high early, low late)
+  - the step-position distribution where positivity holds (are high-entropy steps concentrated early?)
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 def spearman(xs: list[float], ys: list[float]) -> float:
-    """Spearman 秩相关，无 scipy。负值 = 步位越晚熵越低（早高后低）。"""
+    """Spearman rank correlation, no scipy. Negative = the later the step position, the lower the entropy (high early, low late)."""
     n = len(xs)
     if n < 3:
         return float("nan")
@@ -43,7 +43,7 @@ def spearman(xs: list[float], ys: list[float]) -> float:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scan-dir", default="pilot/runs/v5_scan")
-    ap.add_argument("--extra", nargs="*", default=[], help="额外的单任务 v5 report 路径")
+    ap.add_argument("--extra", nargs="*", default=[], help="extra single-task v5 report paths")
     args = ap.parse_args()
 
     reports = list(Path(args.scan_dir).glob("*/v5_report.json"))
@@ -81,10 +81,10 @@ def main() -> int:
         "high_entropy_fraction": round(n_high / n_total, 3) if n_total else None,
         "spearman_pos_vs_entropy": round(rho, 3),
         "interpretation": (
-            "负相关支持'早高后低'：步位越晚熵越低"
+            "negative correlation supports 'high early, low late': the later the step position, the lower the entropy"
             if rho < -0.2 else
-            "相关弱：熵衰减非单调，拐点因任务而异" if abs(rho) <= 0.2 else
-            "正相关：与预期相反，需检查"
+            "weak correlation: entropy decay is non-monotonic, the knee varies by task" if abs(rho) <= 0.2 else
+            "positive correlation: opposite of expectation, needs checking"
         ),
         "high_entropy_position_mean": (
             round(sum(high_positions) / len(high_positions), 3) if high_positions else None),
@@ -93,12 +93,12 @@ def main() -> int:
     out = Path(args.scan_dir) / "entropy_scan_summary.json"
     out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print("=== V5 多任务熵扫描汇总 ===")
-    print(f"任务数 {result['n_tasks']}  fork点数 {result['n_forkpoints']}")
-    print(f"高熵步占比: {result['high_entropy_fraction']}")
-    print(f"熵 vs 步位 Spearman: {result['spearman_pos_vs_entropy']}  → {result['interpretation']}")
-    print(f"高熵步平均步位: {result['high_entropy_position_mean']} (越小=越集中在早期)")
-    print("\n各任务 熵-步位序列:")
+    print("=== V5 multi-task entropy scan summary ===")
+    print(f"tasks {result['n_tasks']}  fork points {result['n_forkpoints']}")
+    print(f"high-entropy step fraction: {result['high_entropy_fraction']}")
+    print(f"entropy vs step position Spearman: {result['spearman_pos_vs_entropy']}  → {result['interpretation']}")
+    print(f"mean step position of high-entropy steps: {result['high_entropy_position_mean']} (smaller = more concentrated early)")
+    print("\nper-task entropy-vs-position series:")
     for t in per_task:
         seq_str = " ".join(f"{s['pos']:.2f}:{'H' if s['high'] else '.'}({s['H']:.2f})" for s in t["seq"])
         print(f"  {t['instance']} (n={t['n_steps']}): {seq_str}")

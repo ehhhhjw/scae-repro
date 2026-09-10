@@ -1,16 +1,18 @@
-"""E5 + E3：用 AST 给关键步赋予语义类型，并检验 A5 的经验基础。零 API 成本。
+"""E5 + E3: assign semantic types to critical steps via AST, and test A5's empirical basis. Zero API cost.
 
-E5 成功 case 的关键步是什么样的步？
----------------------------------
-已知 P4：成功 case 的 top-1 正向步 Δ=+0.223（CI 不含 0，显著）。
-但"显著"没回答"那是什么步"。用 AST 把 top-1 步分类，回答"成功是怎么发生的"。
+E5 What kind of step is the critical step of a successful case?
+---------------------------------------------------------------
+Known from P4: the top-1 positive step of successful cases has Δ=+0.223 (CI excludes 0, significant).
+But "significant" does not answer "what step was that". Classify top-1 steps with AST to answer
+"how success happened".
 
-E3 A5（扰动可迁移）是否有经验支撑？
-----------------------------------
-归因用的替代动作若取"AST 图一跳邻居"，前提是策略本身的相邻动作也多在一跳内。
-统计真实 trace 中相邻两步目标的图距离分布即可检验：
-  若多数 ≤1 → 一跳邻居确实是策略的自然候选，A5 有经验支撑
-  若普遍很大 → A5 不成立，须如实报告并改用其他替代动作来源
+E3 Does A5 (perturbation transferability) have empirical support?
+-----------------------------------------------------------------
+If attribution takes the substitute action to be an "AST one-hop neighbour", the premise is that the
+policy's own adjacent actions also mostly stay within one hop.
+Testing it only needs the graph-distance distribution over adjacent-step targets in real traces:
+  if most are ≤1 → one-hop neighbours really are the policy's natural candidates, A5 has empirical support
+  if generally large → A5 fails, must be reported faithfully and another substitute-action source used
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ def target_of(step, repo) -> str:
 
 
 def classify_step(steps, k: int, gold: frozenset[str], repo) -> list[str]:
-    """给第 k 步（1-based）打语义标签。可多标签。"""
+    """Assign semantic labels to step k (1-based). Multi-label allowed."""
     labels = []
     tgt = target_of(steps[k - 1], repo)
     prior = {target_of(s, repo) for s in steps[: k - 1]}
@@ -74,7 +76,7 @@ def main() -> int:
 
     e5 = {"succeeded": Counter(), "failed": Counter()}
     e5_n = {"succeeded": 0, "failed": 0}
-    hops_adj: list[int] = []          # 相邻两步的图距离
+    hops_adj: list[int] = []          # graph distance between adjacent steps
     hops_unreach = 0
     hops_total = 0
     per_case = []
@@ -105,7 +107,7 @@ def main() -> int:
                          "top1_step": k, "labels": labs,
                          "top1_delta": r.get("causal_top1_delta")})
 
-        # E3：相邻两步的 AST 图距离
+        # E3: AST graph distance between adjacent steps
         prev = ""
         for s in steps:
             tgt = target_of(s, inst.repo)
@@ -119,7 +121,7 @@ def main() -> int:
             if tgt:
                 prev = tgt
         if i % 10 == 0:
-            print(f"  已处理 {i}/{len(attr)}", flush=True)
+            print(f"  processed {i}/{len(attr)}", flush=True)
 
     dist = Counter(hops_adj)
     le1 = sum(c for d, c in dist.items() if d <= 1)
@@ -148,27 +150,27 @@ def main() -> int:
     f1 = res["E3_adjacent_step_graph_distance"]["frac_within_1_hop_among_reachable"]
     fr = res["E3_adjacent_step_graph_distance"]["frac_reachable"]
     res["E3_adjacent_step_graph_distance"]["A5_interpretation"] = (
-        "无 py-py 相邻对，不可判定" if not hops_total else
-        f"可达对中 {f1:.0%} 在一跳内，但仅 {fr:.0%} 的相邻对在 3 跳内可达；"
-        + ("A5 有经验支撑" if (f1 or 0) >= 0.5 and (fr or 0) >= 0.5
-           else "A5 缺经验支撑：多数相邻动作在依赖图上并不邻近，"
-                "'一跳邻居'不是策略的自然候选，需改用其他替代动作来源")
+        "no py-py adjacent pairs, undecidable" if not hops_total else
+        f"{f1:.0%} of reachable pairs are within one hop, but only {fr:.0%} of adjacent pairs are reachable within 3 hops; "
+        + ("A5 has empirical support" if (f1 or 0) >= 0.5 and (fr or 0) >= 0.5
+           else "A5 lacks empirical support: most adjacent actions are not adjacent in the dependency graph, "
+                "'one-hop neighbour' is not the policy's natural candidate, another substitute-action source is needed")
     )
 
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    print("\n=== E5 top-1 关键步的语义类型 ===")
+    print("\n=== E5 semantic types of the top-1 critical step ===")
     for g in ("succeeded", "failed"):
         d = res["E5_top1_step_types"][g]
         print(f"  {g} (n={d['n_cases']}):")
         for k2, v in sorted(d["label_rates"].items(), key=lambda x: -x[1]):
             print(f"     {k2:<24} {v:>6.1%}  ({d['label_counts'][k2]})")
     e3 = res["E3_adjacent_step_graph_distance"]
-    print(f"\n=== E3 相邻步的 AST 图距离（A5 检验）===")
-    print(f"  py→py 相邻对 {e3['n_pairs_py_to_py']}，3跳内可达 {e3['n_reachable_within_3']}"
-          f"（{e3['frac_reachable']}），不可达 {e3['n_unreachable']}")
-    print(f"  距离分布 {e3['distance_counts']}  中位 {e3['median_distance']}")
+    print(f"\n=== E3 AST graph distance of adjacent steps (A5 test) ===")
+    print(f"  py→py adjacent pairs {e3['n_pairs_py_to_py']}, reachable within 3 hops {e3['n_reachable_within_3']}"
+          f" ({e3['frac_reachable']}), unreachable {e3['n_unreachable']}")
+    print(f"  distance distribution {e3['distance_counts']}  median {e3['median_distance']}")
     print(f"  → {e3['A5_interpretation']}")
     print(f"\n→ {args.out}")
     return 0

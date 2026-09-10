@@ -1,19 +1,19 @@
 # dataset/
 
-数据集放这里。复现包不携带数据（仓库快照几十 GB）。
+Put the dataset here. The reproduction package carries no data (repository snapshots are tens of GB).
 
-    python3 ../setup/prepare_dataset.py --from-hf --skip-clone   # 只生成 CSV
-    python3 ../setup/prepare_dataset.py --from-hf --clone        # 含仓库快照
+    python3 ../setup/prepare_dataset.py --from-hf --skip-clone   # CSV only
+    python3 ../setup/prepare_dataset.py --from-hf --clone        # including repository snapshots
 
-生成后应有：
+After generation you should have:
 
-    dataset/instance_summary.csv     500 行，字段 instance_id/base_commit/problem_statement/patch_file
-    dataset/projects/<instance_id>/  每实例一个 git 快照，HEAD == base_commit
+    dataset/instance_summary.csv     500 rows, fields instance_id/base_commit/problem_statement/patch_file
+    dataset/projects/<instance_id>/  one git snapshot per instance, HEAD == base_commit
 
-也可以用环境变量指向别处，不必放这里：
+You can also point elsewhere via environment variables instead of putting files here:
 
     export SCAE_CSV=/path/to/instance_summary.csv
     export SCAE_PROJECTS=/path/to/projects
 
-⚠️ 分发的快照常常叠着 gold patch（已修复状态）= 泄题。跑
-`python3 ../setup/prepare_dataset.py --verify-only` 体检。见 ../docs/PITFALLS.md
+⚠️ Distributed snapshots often have the gold patch already applied (fixed state) = answer leakage. Run
+`python3 ../setup/prepare_dataset.py --verify-only` to check. See ../docs/PITFALLS.md

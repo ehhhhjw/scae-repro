@@ -1,17 +1,18 @@
-"""X4c：X4 的**层级匹配**复核，落盘。零 API。
+"""X4c: the **level-matched** re-check of X4, written to disk. Zero API.
 
-为何单独成脚本
---------------
-X4b 证明 U^exec 的结构在**实例层**（残差化 ICC 0.640）而非步层（无步位、无工具效应）。
-那么用**步级** H_tool 去对它本身层级不匹配，必须补一个实例级的检验。
-该检验此前是临时算的、**没有落盘**，于是论文里的 rho=−0.219 / −0.425 无法溯源
-——正是踩坑 #12 要避免的情况。本脚本把它固定下来。
+Why a separate script
+---------------------
+X4b showed that the structure of U^exec is at the **instance level** (residualized ICC 0.640), not the
+step level (no step position, no tool effect). Using **step-level** H_tool against it is therefore level
+mismatched, so an instance-level test must be added.
+That test was previously computed ad hoc and **never written to disk**, so the paper's rho=−0.219 / −0.425
+could not be traced -- exactly the situation pitfall #12 is meant to avoid. This script pins it down.
 
-被估量
-------
-实例级聚合后的 Spearman：
+Estimand
+--------
+Spearman after instance-level aggregation:
     mean/max H_tool  ~  mean/max U^exec_t
-对照量（用于证明被解释变量有反应）：实例 recall、v0、步数 ~ mean U^exec。
+Control quantities (used to show the dependent variable does respond): instance recall, v0, step count ~ mean U^exec.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ def main() -> int:
     ap.add_argument("--out", default="pilot/runs/x4c_instance_level.json")
     args = ap.parse_args()
 
-    # 全局工具转移模型 → H_tool(当前工具)
+    # global tool-transition model → H_tool(current tool)
     trans: dict[str, Counter] = defaultdict(Counter)
     step_tool: dict[str, list[str]] = {}
     for p in sorted(Path(args.runs_root).glob("shard*/rollouts/*.jsonl")):
@@ -79,7 +80,7 @@ def main() -> int:
 
     res: dict = {
         "n_instances": len(rows),
-        "note": "X4b 显示 U^exec 的结构在实例层，故这是层级匹配后的检验",
+        "note": "X4b shows the structure of U^exec is at the instance level, so this is the level-matched test",
         "LEVEL_MATCHED": {}, "CONTROLS": {},
     }
     for hx in ("h_mean", "h_max"):
@@ -94,15 +95,15 @@ def main() -> int:
 
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
-    print(f"实例级样本 n={len(rows)}")
-    print("\n=== 层级匹配：实例级 H_tool ~ 实例级 U^exec ===")
+    print(f"instance-level samples n={len(rows)}")
+    print("\n=== level matched: instance-level H_tool ~ instance-level U^exec ===")
     for k, v in res["LEVEL_MATCHED"].items():
         print(f"  {k:<18} rho={v['rho']:+.4f} CI{v['ci95']}  "
-              f"{'显著' if v['significant'] else '不显著'}")
-    print("\n=== 对照（证明被解释变量有反应）===")
+              f"{'significant' if v['significant'] else 'not significant'}")
+    print("\n=== controls (showing the dependent variable responds) ===")
     for k, v in res["CONTROLS"].items():
         print(f"  {k:<18} rho={v['rho']:+.4f} CI{v['ci95']}  n={v['n']}  "
-              f"{'显著' if v['significant'] else '不显著'}")
+              f"{'significant' if v['significant'] else 'not significant'}")
     print(f"\n→ {args.out}")
     return 0
 

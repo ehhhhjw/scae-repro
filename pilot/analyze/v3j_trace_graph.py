@@ -1,40 +1,43 @@
-"""V3j：把 trace 本身当图 —— 执行溯源图（provenance graph）上的预测与归因。零 API。
+"""V3j: treat the trace itself as a graph -- prediction and attribution on the execution provenance graph. Zero API.
 
-动机
-----
-前面所有实验都把 trace 当**序列**（tool_t → tool_{t+1}），把结构信息寄托在
-**代码依赖图**上。但 trace 本身就是一张图：第 t 步的**输出**是第 t' 步的
-**输入依据**。V3i 已证代码图不刻画步间转移（相邻步一跳率 lift 0.94），
-而一个更贴近机制的假设从未被检验：
-
-    agent 不是走到"代码上的邻居"，而是走到**它刚在某个工具输出里看到的东西**。
-
-grep 返回 `astropy/io/ascii/rst.py:35:class RST(...)`，下一步就去读这个文件。
-这是一条**溯源边** s_t → s_{t'}，与代码依赖无关。这正好能覆盖 V3g 判定
-"不可预测"的 67% 首访步 —— 因为首访对象虽未被**访问**过，却很可能已被**提及**过。
-
-溯源图定义
+Motivation
 ----------
-节点 = 步 s_1..s_n（+ 终止答案节点 A）
-边：
-  P 溯源   s_t → s_{t'}  若 s_{t'} 的操作对象**字面出现在** s_t 的输出里 (t<t')
-  S 顺序   s_t → s_{t+1}
-  A 答案   s_t → A       若 s_t 的对象出现在最终答案里
+All earlier experiments treated the trace as a **sequence** (tool_t → tool_{t+1}) and pinned the structural
+information on the **code dependency graph**. But the trace is itself a graph: the **output** of step t is the
+**input evidence** of step t'. V3i already showed the code graph does not characterize step-to-step transitions
+(one-hop rate lift 0.94 on adjacent steps), while a hypothesis much closer to the mechanism was never tested:
 
-本脚本做的实验
---------------
-  G0 溯源覆盖率：首访对象中有多大比例**先被提及过**？（决定假设的上限）
-  G1 溯源预测器：uniform / recency / freq 三种加权，在**与 V3g 逐点一致**的
-     点集上评估，并与 marginal、代码图多源邻近（V3i 的 C1）配对对比
-  G2 路由修正：pi·历史 + (1−pi)·溯源(未访问)，对比 V3g 的 pi·历史 + (1−pi)·代码图
-  G3 溯源图的结构量：入度/出度/是否答案祖先，作为逐步 UQ 候选量
-     （与 U^exec 的相关待 V4′ 完成后接入 V4′ 的真实重放方差）
+    the agent does not walk to "a neighbor in the code", it walks to **something it just saw in some tool output**.
 
-判据
-----
-若 G0 覆盖率高且 G1 在 F regime 上显著超过 marginal 与 C1，
-则「首访步不可预测」这一负面结论应修正为「**用错了结构**」——
-正确的结构不是代码图而是 agent 自身的观测溯源。
+grep returns `astropy/io/ascii/rst.py:35:class RST(...)`, and the next step reads that file.
+This is a **provenance edge** s_t → s_{t'}, unrelated to code dependency. It happens to cover exactly the 67% of
+first-visit steps V3g declared "unpredictable" -- a first-visit object has never been **visited**, yet it has very
+likely already been **mentioned**.
+
+Provenance graph definition
+---------------------------
+nodes = steps s_1..s_n (+ terminal answer node A)
+edges:
+  P provenance  s_t → s_{t'}  if the object operated on by s_{t'} **appears literally in** s_t's output (t<t')
+  S sequential  s_t → s_{t+1}
+  A answer      s_t → A       if s_t's object appears in the final answer
+
+Experiments in this script
+--------------------------
+  G0 provenance coverage: what fraction of first-visit objects were **mentioned earlier**? (bounds the hypothesis)
+  G1 provenance predictors: uniform / recency / freq weighting, evaluated on a point set **pointwise identical
+     to V3g's**, and compared pairwise against marginal and code-graph multi-source proximity (V3i's C1)
+  G2 routing fix: pi·history + (1−pi)·provenance(unvisited), against V3g's pi·history + (1−pi)·code graph
+  G3 structural quantities of the provenance graph: in-degree/out-degree/whether an answer ancestor, as
+     candidate per-step UQ quantities
+     (their correlation with U^exec waits on V4′'s real replay variance once V4′ is done)
+
+Criterion
+---------
+If G0 coverage is high and G1 significantly beats both marginal and C1 on the F regime,
+then the negative conclusion "first-visit steps are unpredictable" should be revised to
+"**the wrong structure was used**" -- the right structure is not the code graph but the
+agent's own observation provenance.
 """
 
 from __future__ import annotations
@@ -63,14 +66,14 @@ from pilot.analyze.v3i_graph_probe import (                         # noqa: E402
 )
 
 SEED = 20260814
-# 路径样式：含扩展名的相对路径，或 grep 的 `path:line:` 前缀
+# Path pattern: relative path with an extension, or grep's `path:line:` prefix
 PATH_RE = re.compile(
     r"(?<![\w./-])((?:[\w.-]+/)*[\w.-]+\.(?:py|pyx|pyi|rst|txt|cfg|toml|ini|md|json|ya?ml|c|h|cpp|hpp|js|html))"
 )
 
 
 def load_episodes_with_output(runs_root: Path) -> list[dict]:
-    """与 v3_nextstep_dual.load_episodes 同构，但**保留每步的输出文本**。"""
+    """Isomorphic to v3_nextstep_dual.load_episodes, but **keeps each step's output text**."""
     insts = {i.instance_id: i for i in T.load_instances()}
     eps = []
     for f in sorted(runs_root.glob("shard*/rollouts/*.jsonl")):
@@ -99,7 +102,7 @@ def load_episodes_with_output(runs_root: Path) -> list[dict]:
 
 
 def mentioned_nodes(g, text: str, cap: int = 4000) -> list[str]:
-    """从一段工具输出里抽出可解析为图节点的路径（去重，保序）。"""
+    """Extract, from a chunk of tool output, the paths resolvable to graph nodes (deduplicated, order preserved)."""
     if not text:
         return []
     out, seen = [], set()
@@ -116,9 +119,9 @@ def mentioned_nodes(g, text: str, cap: int = 4000) -> list[str]:
 
 def p_prov(mentions: dict[str, list[int]], t: int, mode: str,
            gamma: float = 0.8, exclude: set[str] | None = None) -> dict[str, float]:
-    """溯源先验。mentions[node] = 被提及的步号列表。
+    """Provenance prior. mentions[node] = list of step indices where it was mentioned.
 
-    mode: uniform / recency（按最近一次提及衰减）/ freq（按提及次数）
+    mode: uniform / recency (decay by the most recent mention) / freq (by mention count)
     """
     w: dict[str, float] = {}
     for node, occ in mentions.items():
@@ -138,7 +141,7 @@ def p_prov(mentions: dict[str, list[int]], t: int, mode: str,
 
 def boot_ci(vals: list[float], b: int = 2000, seed: int = SEED) -> dict:
     if not vals:
-        return {"note": "无样本"}
+        return {"note": "no samples"}
     rng = random.Random(seed)
     pts = []
     for _ in range(b):
@@ -153,7 +156,7 @@ def boot_ci(vals: list[float], b: int = 2000, seed: int = SEED) -> dict:
 def paired_ci(a: list[float], b: list[float], bnum: int = 2000,
               seed: int = SEED) -> dict:
     if len(a) != len(b) or not a:
-        return {"note": f"点集不匹配 {len(a)} vs {len(b)}"}
+        return {"note": f"point sets do not match {len(a)} vs {len(b)}"}
     rng = random.Random(seed)
     pts = []
     for _ in range(bnum):
@@ -176,13 +179,13 @@ def main() -> int:
     by_repo: dict[str, list[dict]] = defaultdict(list)
     for e in eps:
         by_repo[e["project"]].append(e)
-    print(f"载入 {len(eps)} episode（已构图，含输出文本）")
+    print(f"loaded {len(eps)} episodes (graphs built, output text included)")
 
     PRED = ["prov_uniform", "prov_recency", "prov_freq",
             "prov_lastout", "prov_lastout_ranked",
             "hist_freq", "marginal_repo", "graph_C1",
             "routed_prov", "routed_graph"]
-    # 逐点期望命中，按 regime 分桶；F 桶用于关键对比
+    # Pointwise expected hits, bucketed by regime; the F bucket carries the key comparison
     hits = {p: {r: {k: [] for k in KS} for r in ("all", "R", "F")} for p in PRED}
     cov = {p: {r: [] for r in ("all", "R", "F")} for p in PRED}
     effc = {p: [] for p in PRED}
@@ -190,7 +193,7 @@ def main() -> int:
     g0_mentioned_before, g0_first_visit = [], 0
     g0_by_regime = {"R": [], "F": []}
     n_R = n_F = 0
-    # G3 结构量
+    # G3 structural quantities
     g3_rows = []
 
     for proj, group in by_repo.items():
@@ -201,14 +204,14 @@ def main() -> int:
             objfreq = Counter(s["node"] for x in train for s in x["seq"] if s["node"])
             g, seq = held["graph"], held["seq"]
             nodes = [s["node"] for s in seq]
-            # 预抽每步输出里提到的节点
+            # Pre-extract the nodes mentioned in each step's output
             outs = [mentioned_nodes(g, s["out"]) for s in seq]
 
             mentions: dict[str, list[int]] = defaultdict(list)
             visits: list[str] = []
             seen: set[str] = set()
             prev_rev = False
-            # regime 转移率（与 V3g 同法，从 train 估）
+            # regime transition rate (same method as V3g, estimated from train)
             rc: dict[bool, Counter] = {True: Counter(), False: Counter()}
             for x in train:
                 sq, sn = x["seq"], set()
@@ -231,7 +234,7 @@ def main() -> int:
                 if nodes[t]:
                     visits.append(nodes[t])
                     seen.add(nodes[t])
-                # 第 t 步的输出在预测第 t+1 步时**已可见**
+                # Step t's output is **already visible** when predicting step t+1
                 for nd in outs[t]:
                     mentions[nd].append(t)
                 truth = nodes[t + 1]
@@ -249,7 +252,7 @@ def main() -> int:
 
                 pi = pi_hat(prev_rev)
                 fseeds = {x for x in seen if not x.startswith("dir:") and x in g.files}
-                # 代码图 C1 多源邻近（V3i 的最强形式），排除已访问
+                # Code graph C1 multi-source proximity (V3i's strongest form), excluding already visited
                 if fseeds:
                     dd = multi_source_dist(g, fseeds)
                     aa = seed_adjacency(g, fseeds)
@@ -262,9 +265,9 @@ def main() -> int:
                     c1 = {}
                 prov_uns = p_prov(mentions, t, "freq", exclude=seen)
                 ph = p_hist(visits, nodes[t], "freq")
-                # 更锋利的机制检验：只用**最近一次有提及的输出**。
-                # 若它已达到 prov_recency 的水平，则机制就是
-                # "读刚才那条输出里列出的文件"，而非"整段观测史的加权"。
+                # A sharper mechanism test: use only the **most recent output that had mentions**.
+                # If it already reaches prov_recency's level, then the mechanism is
+                # "read the files listed in that last output", not "a weighting of the whole observation history".
                 last: list[str] = []
                 for tt in range(t, -1, -1):
                     if outs[tt]:
@@ -295,7 +298,7 @@ def main() -> int:
                         effc[nm].append(eff_cand(d))
                 prev_rev = is_rev
 
-            # ---- G3 溯源图结构量 ----
+            # ---- G3 provenance graph structural quantities ----
             n_edges = sum(1 for t in range(len(seq))
                           for nd in outs[t] if nd in nodes[t + 1:t + 2])
             g3_rows.append({
@@ -314,7 +317,8 @@ def main() -> int:
         "G0_provenance_coverage": {
             "first_visit_target_was_mentioned_before": boot_ci(g0_mentioned_before),
             "by_regime": {r: boot_ci(v) for r, v in g0_by_regime.items()},
-            "note": "首访对象中『此前已被某步输出提及』的比例 —— 溯源假设的上限",
+            "note": "fraction of first-visit objects that were \"already mentioned in some earlier step's output\" "
+                    "-- the upper bound of the provenance hypothesis",
         },
         "G1_predictors": {
             nm: {
@@ -340,7 +344,7 @@ def main() -> int:
                                                    hits["graph_C1"]["F"][3]),
             "prov_recency_vs_prov_freq_top3": paired_ci(hits["prov_recency"]["F"][3],
                                                         hits["prov_freq"]["F"][3]),
-            # 机制辨析：整段观测史 vs 只看最近一条输出
+            # Mechanism discrimination: whole observation history vs only the most recent output
             "prov_recency_vs_lastout_top3": paired_ci(hits["prov_recency"]["F"][3],
                                                       hits["prov_lastout"]["F"][3]),
             "prov_recency_vs_lastout_top10": paired_ci(hits["prov_recency"]["F"][10],
@@ -361,32 +365,32 @@ def main() -> int:
                 k: round(statistics.mean([r[k] for r in g3_rows]), 4)
                 for k in ("n_steps", "n_mentioned_total", "n_visited",
                           "mention_to_visit_rate")},
-            "note": "n_mentioned_total 远大于 n_visited 说明 agent 看到的远多于它去的；"
-                    "mention_to_visit_rate 是『被提及者最终被访问』的比例",
+            "note": "n_mentioned_total far exceeding n_visited means the agent sees far more than it goes to; "
+                    "mention_to_visit_rate is the fraction of \"mentioned objects that end up visited\"",
         },
     }
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    # ------------------------------------------------------------- 打印
+    # ------------------------------------------------------------- print
     g0 = res["G0_provenance_coverage"]
-    print(f"\n=== G0 溯源覆盖率（假设的上限）===")
+    print(f"\n=== G0 provenance coverage (upper bound of the hypothesis) ===")
     b = g0["first_visit_target_was_mentioned_before"]
-    print(f"  首访对象『此前已被输出提及』：{b['mean']:.4f} CI{b['ci95']} (n={b['n']})")
+    print(f"  first-visit object \"already mentioned in an output\": {b['mean']:.4f} CI{b['ci95']} (n={b['n']})")
     for r in ("R", "F"):
         v = g0["by_regime"][r]
         print(f"    regime {r}: {v['mean']:.4f} CI{v['ci95']} (n={v['n']})")
 
-    print(f"\n=== G1 预测器：全部点（分母={n_R + n_F}）===")
-    print(f"{'预测器':<16}{'覆盖':>8}{'top1':>8}{'top3':>8}{'top10':>8}{'有效候选':>10}")
+    print(f"\n=== G1 predictors: all points (denominator={n_R + n_F}) ===")
+    print(f"{'predictor':<16}{'coverage':>8}{'top1':>8}{'top3':>8}{'top10':>8}{'eff_cand':>10}")
     for nm in PRED:
         d = res["G1_predictors"][nm]["all"]
         print(f"{nm:<16}{d['coverage']:>8.4f}{d['topk']['top1']:>8.4f}"
               f"{d['topk']['top3']:>8.4f}{d['topk']['top10']:>8.4f}"
               f"{str(res['G1_predictors'][nm]['eff_candidates']):>10}")
 
-    print(f"\n=== G1 首访步 F（n={n_F}）—— 关键战场 ===")
-    print(f"{'预测器':<16}{'覆盖':>8}{'top3':>18}{'top10':>18}")
+    print(f"\n=== G1 first-visit steps F (n={n_F}) -- the decisive battleground ===")
+    print(f"{'predictor':<16}{'coverage':>8}{'top3':>18}{'top10':>18}")
     for nm in PRED:
         d = res["G1_predictors"][nm]["F"]
         t3, t10 = d["topk"]["top3"], d["topk"]["top10"]
@@ -396,22 +400,22 @@ def main() -> int:
               f"{t3['mean']:>10.4f} CI{t3['ci95']}"
               f"{t10['mean']:>8.4f} CI{t10['ci95']}")
 
-    print(f"\n=== 首访步上的配对对比 ===")
+    print(f"\n=== Paired contrasts on first-visit steps ===")
     for k, v in res["G1_contrasts_on_first_visit"].items():
         if "note" in v:
             print(f"  {k:<34} {v['note']}")
             continue
         print(f"  {k:<34} {v['diff']:+.4f}  CI[{v['ci95'][0]:+.4f}, "
-              f"{v['ci95'][1]:+.4f}]  {'显著' if v['significant'] else '不显著'}")
+              f"{v['ci95'][1]:+.4f}]  {'significant' if v['significant'] else 'not significant'}")
 
-    print(f"\n=== G2 路由：溯源 vs 代码图 ===")
+    print(f"\n=== G2 routing: provenance vs code graph ===")
     for k, v in res["G2_routing_contrasts_all"].items():
         if "note" in v:
             continue
         print(f"  {k:<38} {v['diff']:+.4f}  CI[{v['ci95'][0]:+.4f}, "
-              f"{v['ci95'][1]:+.4f}]  {'显著' if v['significant'] else '不显著'}")
+              f"{v['ci95'][1]:+.4f}]  {'significant' if v['significant'] else 'not significant'}")
 
-    print(f"\n=== G3 溯源图规模 ===")
+    print(f"\n=== G3 provenance graph scale ===")
     for k, v in res["G3_trace_graph_structure"]["per_episode_mean"].items():
         print(f"  {k:<24} {v}")
 

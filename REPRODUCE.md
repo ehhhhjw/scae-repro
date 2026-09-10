@@ -1,303 +1,333 @@
-# 复现执行步骤
+# Reproduction Steps
 
-本文件是本仓库的操作手册。按顺序读到你要走的那条路线即可。
+This file is the operating manual for this repository. Read in order until you reach the route you want to take.
 
-> **先读 [docs/PITFALLS.md](docs/PITFALLS.md)。** 那里列的坑（尤其是 gold patch 泄题）
-> 会在不报任何错的情况下毁掉全部结果，而且毁掉的方式是**让数字变好看**。
+> **Read [docs/PITFALLS.md](docs/PITFALLS.md) first.** The pitfalls listed there (especially gold
+> patch leakage) will destroy every result without raising a single error, and the way they destroy
+> them is by **making the numbers look better**.
 
 ---
 
-## 0. 选一条路线
+## 0. Pick a route
 
-| 路线 | 前置 | 耗时 | 产出 |
+| Route | Prerequisites | Time | Output |
 |---|---|---|---|
-| **A 自检** | python 3.10+、numpy | ~10 秒 | Appendix D.7（合成数据，有真值） |
-| **B 离线分析** | 一份 `pilot/runs/` 录制产物 | ~5–30 分钟 | 论文全部表格与统计量 |
-| **C 全量重跑** | codex CLI + API key + 数据集 + 30h+ | 30h+ | 从零重跑，含 agent 执行 |
+| **A Self-check** | python 3.10+, numpy | ~10 s | Appendix D.7 (synthetic data, ground truth known) |
+| **B Offline analysis** | one recorded `pilot/runs/` artifact set | ~5-30 min | all tables and statistics in the paper |
+| **C Full re-run** | codex CLI + API key + dataset + 30h+ | 30h+ | re-run from scratch, including agent execution |
 
-本包**不携带录制数据**（完整 17GB）。路线 B 需你自备产物，路线 C 从头生成。
+This package **does not ship the recorded data** (17GB in full). Route B needs you to supply the
+artifacts; route C generates them from scratch.
 
 ---
 
-## 1. 环境与数据集
+## 1. Environment and dataset
 
-### 1.1 依赖
+### 1.1 Dependencies
 
 ```bash
-python3 --version          # 需 >= 3.10（代码用了 X | Y 类型标注）
+python3 --version          # needs >= 3.10 (the code uses X | Y type annotations)
 pip install -r requirements.txt
 ```
 
-只有 `numpy`。**没有** scipy / sklearn / torch —— 估计器与检验（IRLS + Laplace、
-置换检验、bootstrap、Spearman、BH-FDR）都是手写的，这样复现不受版本漂移影响。
+Only `numpy`. **No** scipy / sklearn / torch -- the estimators and tests (IRLS + Laplace,
+permutation test, bootstrap, Spearman, BH-FDR) are all hand-written, so reproduction is immune to
+version drift.
 
-### 1.2 配置
+### 1.2 Configuration
 
 ```bash
 cp env.example.sh env.sh
-vim env.sh          # 至少填 IDEALAB_API_KEY（仅采集需要）与数据集路径
+vim env.sh          # at minimum fill in IDEALAB_API_KEY (needed for collection only) and the dataset path
 source env.sh
 ```
 
-### 1.3 数据集
+### 1.3 Dataset
 
-论文语料是 SWE-bench-Verified 的 500 个实例。代码需要两样东西：
+The paper's corpus is the 500 instances of SWE-bench-Verified. The code needs two things:
 
-1. `instance_summary.csv` —— 字段 `instance_id, base_commit, problem_statement, patch_file`，
-   其中 `patch_file` 是 gold patch 触及的文件路径（换行分隔），**就是论文的 F\***
-2. `projects/<instance_id>/` —— 每实例一个 git 仓库快照，HEAD 停在 `base_commit`
+1. `instance_summary.csv` -- fields `instance_id, base_commit, problem_statement, patch_file`,
+   where `patch_file` is the file paths touched by the gold patch (newline-separated), **this is
+   exactly the paper's F\***
+2. `projects/<instance_id>/` -- one git repository snapshot per instance, HEAD parked at `base_commit`
 
 ```bash
-# 只生成 CSV（约 900KB，秒级）
+# Generate the CSV only (about 900KB, takes seconds)
 python3 setup/prepare_dataset.py --from-hf --skip-clone
-# 或用本地 SWE-bench-Verified JSON
+# Or use a local SWE-bench-Verified JSON
 python3 setup/prepare_dataset.py --from-json /path/to/instance_questions.json
 
-# 克隆仓库快照（几十 GB，数小时；路线 C 必需，路线 A/B 不需要）
+# Clone the repository snapshots (tens of GB, several hours; required for route C, not for A/B)
 python3 setup/prepare_dataset.py --from-hf --clone --workers 4
 
-# 已有快照？只体检是否停在 base_commit（强烈建议跑）
+# Already have snapshots? Just check whether they are parked at base_commit (strongly recommended)
 python3 setup/prepare_dataset.py --verify-only
 ```
 
-`--verify-only` 会报出 `dirty` / `wrong_commit` 的实例。**任何一个非 ok 都意味着泄题风险**，
-因为分发的快照常常叠着 gold patch（= 已修复状态）。
+`--verify-only` reports instances that are `dirty` / `wrong_commit`. **Any single non-ok instance
+means leakage risk**, because distributed snapshots often have the gold patch already applied
+(= already-fixed state).
 
-### 1.4 自检
+### 1.4 Self-check
 
 ```bash
-python3 setup/check_env.py            # 离线分析档
-python3 setup/check_env.py --collect  # 采集档：额外查 git / codex CLI / API key
+python3 setup/check_env.py            # offline-analysis profile
+python3 setup/check_env.py --collect  # collection profile: additionally checks git / codex CLI / API key
 ```
 
 ---
 
-## 2. 路线 A：自检（不需要任何数据）
+## 2. Route A: self-check (needs no data at all)
 
 ```bash
 python3 -m pilot.analyze.uq_selftest
 ```
 
-复现论文 Appendix D.7 —— 在**已知生成过程**的合成数据上验证三分解：
+Reproduces Appendix D.7 of the paper -- validating the three-way decomposition on synthetic data
+with a **known generating process**:
 
-| 量 | 本包实测 | 论文 |
+| Quantity | Measured here | Paper |
 |---|---|---|
-| 参数恢复 corr(w_true, MAP) | 0.9935 | 0.994 |
-| 支撑内概率 MAE | 0.022 | 0.022 |
-| 预测熵分解 | 0.4638 = 0.3075 + 0.1458 + 0.0124 | 0.464 = 0.308/0.146/0.012 |
-| epistemic 支撑外膨胀 | 0.0124 → 0.1002（×8.08） | ×8.1 |
+| Parameter recovery corr(w_true, MAP) | 0.9935 | 0.994 |
+| In-support probability MAE | 0.022 | 0.022 |
+| Predictive entropy decomposition | 0.4638 = 0.3075 + 0.1458 + 0.0124 | 0.464 = 0.308/0.146/0.012 |
+| Epistemic off-support inflation | 0.0124 → 0.1002 (×8.08) | ×8.1 |
 
-这项验证的**边界**要说清楚：它证明三分解的机器在真值已知时工作正常，
-**不**证明三个分量在真实轨迹上可识别。论文 D.7 明确写了后者未建立。
+The **boundary** of this validation must be stated clearly: it shows the three-way decomposition
+machinery works when ground truth is known, it does **not** show the three components are
+identifiable on real traces. Paper D.7 explicitly states the latter is not established.
 
 ---
 
-## 3. 路线 C：全量重跑
+## 3. Route C: full re-run
 
-四个阶段。每个阶段的脚本都可单独重跑，且都会校验前置产物。
+Four stages. Every stage script can be re-run independently, and each validates its upstream
+artifacts.
 
-### 阶段 0：可行性验证（~10–30 分钟）
+### Stage 0: feasibility validation (~10-30 min)
 
 ```bash
 bash scripts/00_smoke.sh
 ```
 
-验掉五个决定方法可行性的未知量，并产出论文 §5.2 报告的两项前置验证：
+Clears the five unknowns that decide whether the method is feasible, and produces the two
+prerequisite validations reported in §5.2 of the paper:
 
-- **重放一致性 1.00**（100 个动作逐字节相同）→ 假设 3「可重放环境」
-- **压缩事件 0 次** → 假设 1「上下文可观测」
+- **Replay consistency 1.00** (100 actions byte-identical) → assumption 3 "replayable environment"
+- **Compression events 0** → assumption 1 "context observable"
 
-同时用 `probe_v5` 测动作熵 = **positivity 的直接测量**。论文的关键发现之一是
-positivity 是**局部**性质：50% 的探测点有动作随机性，且与步位的秩相关只有 +0.072
-（**不**是单调衰减——这是预注册里没被支持的一项，论文如实报告了）。
+At the same time `probe_v5` measures action entropy = a **direct measurement of positivity**. One
+of the paper's key findings is that positivity is a **local** property: 50% of probe points have
+action randomness, and its rank correlation with step position is only +0.072 (**not** a monotone
+decay -- this is one pre-registered item that was not supported, and the paper reports it
+faithfully).
 
-> 任一判据不通过就**不要往下走**。重放不一致意味着环境没钉死
-> （见 `pilot/config/env_pin.sh`），此后所有因果估计都不可信。
+> If any criterion fails, **do not proceed**. Replay inconsistency means the environment is not
+> pinned down (see `pilot/config/env_pin.sh`), and every causal estimate downstream is
+> untrustworthy.
 
-### 阶段 1：全量文件定位（并行 6 路 ~10–20 小时）
+### Stage 1: full file localization (6-way parallel, ~10-20 hours)
 
 ```bash
 bash scripts/01_locate.sh
-# 先小样本验链路：
+# Validate the pipeline on a small sample first:
 SCAE_LIMIT=10 bash scripts/01_locate.sh
 ```
 
-产出全部结论的语料底座：
+Produces the corpus base for every conclusion:
 
-- `pilot/runs/full_locate/results.jsonl` —— 每实例的 Y / recall / n_steps / 预测文件集
-- `pilot/runs/full_locate/shard*/rollouts/*.jsonl` —— 完整轨迹（前缀重放的输入）
+- `pilot/runs/full_locate/results.jsonl` -- per-instance Y / recall / n_steps / predicted file set
+- `pilot/runs/full_locate/shard*/rollouts/*.jsonl` -- full traces (the input to prefix replay)
 
-脚本结束会打印按仓库的定位成功率，对照论文 Table 7（总体 **93.99%**）。
+At the end the script prints per-repository localization success rates; compare against Table 7 of
+the paper (overall **93.99%**).
 
-**泄题闸门**：每个实例跑前强制 `git reset --hard <base_commit>` + `clean -fdq`
-（`pilot/probes/task.py::reset_repo`）。这是最后一道闸，不要绕过。
+**Leakage gate**: before each instance runs, `git reset --hard <base_commit>` + `clean -fdq` is
+forced (`pilot/probes/task.py::reset_repo`). This is the last gate; do not bypass it.
 
-### 阶段 2：前缀重放归因（~12.7 小时，最贵）
+### Stage 2: prefix-replay attribution (~12.7 hours, the most expensive)
 
 ```bash
-bash scripts/02_attribution.sh          # 两档都跑
-bash scripts/02_attribution.sh judge    # 只跑 RQ5 档
-bash scripts/02_attribution.sh power    # 只跑 RQ4 档
+bash scripts/02_attribution.sh          # run both profiles
+bash scripts/02_attribution.sh judge    # RQ5 profile only
+bash scripts/02_attribution.sh power    # RQ4 profile only
 ```
 
-跑两档，因为论文用它们回答两个不同问题：
+Two profiles are run because the paper uses them to answer two different questions:
 
-| 档 | 规模 | m | 用途 |
+| Profile | Scale | m | Purpose |
 |---|---|---|---|
-| `full_attr` | 70 episode / 10 仓库 / 19 个失败 | 3 | RQ5 judge 对比（D.10 / D.11） |
-| `v4prime` | 38 episode → **190 估值点** | **8** | RQ4 步级功效（§5.6） |
+| `full_attr` | 70 episodes / 10 repos / 19 failures | 3 | RQ5 judge comparison (D.10 / D.11) |
+| `v4prime` | 38 episodes → **190 valuation points** | **8** | RQ4 step-level power (§5.6) |
 
-论文 §5.2 的「1901 continuations over 12.7 hours」就是 `v4prime` 这一档。
+The "1901 continuations over 12.7 hours" in §5.2 of the paper is the `v4prime` profile.
 
-脚本会先调 `setup/stage_attr_shards.py` 把定位结果摆成 `parallel --cmd attr` 期望的形状
-（原始实验里这步是手工做的，这里固定下来）。结束时打印 episode 数、估值点数、
-degenerate 率，可直接对照论文（`full_attr` 档 degenerate 应为 **22.9% = 16/70**，
-Δ 恰为 0 的估值点应占 **54.7%**）。
+The script first calls `setup/stage_attr_shards.py` to arrange the localization results into the
+shape `parallel --cmd attr` expects (this step was done by hand in the original experiment; here it
+is fixed in code). At the end it prints the episode count, valuation-point count, and degenerate
+rate, which can be compared directly against the paper (the `full_attr` profile should be
+**22.9% = 16/70** degenerate, and valuation points with Δ exactly 0 should be **54.7%**).
 
-### 阶段 3：judge 跨模型复制（~11 小时，受限流支配）
+### Stage 3: judge cross-model replication (~11 hours, dominated by rate limiting)
 
 ```bash
 bash scripts/03_judge_crossmodel.sh
 ```
 
-复现论文 Table 2。核心操纵：**模型与 rubric 完全不变，只改 judge 看得到的信息集**。
+Reproduces Table 2 of the paper. The core manipulation: **the model and rubric are held completely
+fixed, only the information set the judge can see is changed**.
 
-- `full-trace`：条件于 前缀 + 后继步骤 + 实现的结果 Y ⇒ 条件于 A_t 的后代 ⇒ 碰撞偏差
-- `prefix-only`：条件于固定 60% 前缀，结果 Y 隐藏
+- `full-trace`: conditions on prefix + subsequent steps + realized outcome Y ⇒ conditions on
+  descendants of A_t ⇒ collider bias
+- `prefix-only`: conditions on a fixed 60% prefix, outcome Y hidden
 
-若 full-trace judge 在逼近一个前缀条件化的步局部量，这个操纵**不应**移动归责位置。
-实测位移 **+0.537**，sign test p = 1.1×10⁻¹⁶，三个 judge 全为正。
+If the full-trace judge were approximating a prefix-conditional step-local quantity, this
+manipulation **should not** move the blame location. Measured shift is **+0.537**, sign test
+p = 1.1×10⁻¹⁶, positive for all three judges.
 
-> **限流**：默认 10 次调用 / 60 分钟窗口，25 episode × 2 条件 = 50 次调用 ≈ 5.5 小时/模型。
-> 跑不完不用重头再来：`x9_judge_crossmodel` 支持 `--analyze-only`，在已有 JSONL 上重算。
+> **Rate limiting**: default is 10 calls per 60-minute window, 25 episodes × 2 conditions = 50
+> calls ≈ 5.5 hours per model. If a run does not finish you do not have to start over:
+> `x9_judge_crossmodel` supports `--analyze-only`, recomputing on existing JSONL.
 
-### 阶段 5：U_policy 的 K=4 重复 rollout（~2–4 小时）
+### Stage 5: K=4 repeated rollouts for U_policy (~2-4 hours)
 
 ```bash
 bash scripts/05_upolicy.sh
 ```
 
-三分解 `H[Y|q,G] = U_task + U_policy + U_model` 里，只有 `U_policy` 能从真轨迹**直接**估计：
-固定同一个 q 重复跑 K 次，取各实例结果方差的均值。论文报告 **0.049**（23 个 K=4 实例）。
+In the three-way decomposition `H[Y|q,G] = U_task + U_policy + U_model`, only `U_policy` can be
+estimated **directly** from real traces: hold q fixed, run K times, and take the mean of the
+per-instance outcome variances. The paper reports **0.049** (23 K=4 instances).
 
-主流水线用 K=1（500 × 4 太贵），所以这一档单独跑一个小子集。
+The main pipeline uses K=1 (500 × 4 is too expensive), so this profile is run separately on a small
+subset.
 
-> **复现口径的诚实说明**：论文实际用的那 23 个实例 id 是一份数据产物，**无法从代码推导**。
-> 脚本用一个写死的抽样规则重选（定位成功 + 步数 ≥ 5 + 按仓库分层轮转），
-> 因此你的 `U_policy` 会接近但不必等于 0.0489。有原始列表时用 `SCAE_UPOLICY_IDS` 指过去。
-> 已验证：把原始 `upolicy/results.jsonl` 喂给本包的 `t3_uq_decomposition`，
-> 输出与论文产物**逐字段相同**（0.0489）——即估计器实现无偏差，差异只来自实例抽样。
+> **Honest note on the reproduction definition**: the 23 instance ids the paper actually used are a
+> data artifact and **cannot be derived from the code**. The script reselects them with a hard-coded
+> sampling rule (localization succeeded + step count ≥ 5 + stratified round-robin by repository), so
+> your `U_policy` will be close to but not necessarily equal to 0.0489. If you have the original
+> list, point `SCAE_UPOLICY_IDS` at it.
+> Verified: feeding the original `upolicy/results.jsonl` into this package's `t3_uq_decomposition`
+> produces output **field-for-field identical** to the paper's artifact (0.0489) -- i.e. the
+> estimator implementation has no deviation, the difference comes only from instance sampling.
 
-### 阶段 4：离线分析（几分钟，零 API）
+### Stage 4: offline analysis (minutes, zero API)
 
 ```bash
-bash scripts/04_analysis_offline.sh            # 全跑
-bash scripts/04_analysis_offline.sh rq1        # 单组：rq1|rq2|rq3|rq4|rq5|report|selftest
+bash scripts/04_analysis_offline.sh            # run everything
+bash scripts/04_analysis_offline.sh rq1        # one group: rq1|rq2|rq3|rq4|rq5|report|selftest
 ```
 
-论文的每个数字都由这里的某个脚本写进某个 JSON。逐个映射见
-[docs/PAPER_MAP.md](docs/PAPER_MAP.md)。缺上游产物时脚本会**显式报跳过**，
-不会静默出一个残缺的结论。
+Every number in the paper is written into some JSON by one of the scripts here. See
+[docs/PAPER_MAP.md](docs/PAPER_MAP.md) for the item-by-item mapping. When an upstream artifact is
+missing the script **reports the skip explicitly**; it will not silently emit a truncated
+conclusion.
 
 ---
 
-## 4. 路线 B：只做离线分析
+## 4. Route B: offline analysis only
 
-已有一份录制产物时：
+If you already have a set of recorded artifacts:
 
 ```bash
 export SCAE_RUNS=/path/to/existing/runs
 bash scripts/04_analysis_offline.sh
 ```
 
-`pilot/runs/` 需要的最小结构：
+The minimum structure `pilot/runs/` needs:
 
 ```
 runs/
 ├── full_locate/
-│   ├── results.jsonl              定位结果（合并）
-│   └── shard*/rollouts/*.jsonl    轨迹（RQ1–RQ3 全靠它）
+│   ├── results.jsonl              localization results (merged)
+│   └── shard*/rollouts/*.jsonl    traces (RQ1-RQ3 depend entirely on these)
 ├── full_attr/
-│   ├── attribution.jsonl          70 episode，m=3
+│   ├── attribution.jsonl          70 episodes, m=3
 │   └── shard*/attribution.jsonl
 ├── v4prime/
-│   ├── attribution.jsonl          38 episode，m=8，含 ys_t 明细
+│   ├── attribution.jsonl          38 episodes, m=8, includes ys_t detail
 │   └── shard*/attribution.jsonl
-├── v5_scan/*/v5_report.json       熵探针（C.4 / Table 6）
-├── graphs/<instance_id>/          构图产物（RQ2，71 个实例）
-└── tool_model_official.json       工具信道（由阶段 4 的 rq1 组生成）
+├── v5_scan/*/v5_report.json       entropy probe (C.4 / Table 6)
+├── graphs/<instance_id>/          graph construction artifacts (RQ2, 71 instances)
+└── tool_model_official.json       tool channel (generated by the rq1 group in stage 4)
 ```
 
-体量参考：`full_locate` 的 `rollouts` 约 85MB，各 `attribution.jsonl` 合计约 300KB，
-派生 JSON 约 3.6MB。真正占地方的是 fork 中间产物（`attr_work/`）与 `graphs/`。
-只做离线分析**不需要** `attr_work/`。
+Size reference: the `rollouts` under `full_locate` are about 85MB, the `attribution.jsonl` files
+total about 300KB, derived JSON about 3.6MB. What actually takes up space are the fork intermediate
+artifacts (`attr_work/`) and `graphs/`. Offline analysis alone **does not need** `attr_work/`.
 
 ---
 
-## 5. 图信道的外部依赖（RQ2 的已知缺口）
+## 5. External dependencies of the graph channel (known gap in RQ2)
 
-`pilot/runs/graphs/<instance_id>/` 由 `pilot/channels/graph_builder.py` 生成，
-它调用两个**不随本包分发**的上游工具：
+`pilot/runs/graphs/<instance_id>/` is generated by `pilot/channels/graph_builder.py`, which calls
+two upstream tools that are **not distributed with this package**:
 
 ```
 tree-sitter-fold/AST_Tree_Graph      →  entities.json, dependency_graph.json
 graph_leidan_fold/rag-python-tools   →  cluster_entities.json, cluster_communities.json
 ```
 
-因此 RQ2 的完整复现需要这两个工具。缺失时的处理：
+Full reproduction of RQ2 therefore requires these two tools. Handling when they are missing:
 
-- `scripts/04_analysis_offline.sh rq2` 会显式提示缺 `graphs/`，并退化为只报可解析子集
-- `pilot/graph/ast_index.py` 是**纯 stdlib** 的 AST 索引（符号定义点、import 边、图距离），
-  可作为依赖图的替代来源，但它产出的图与论文用的不是同一个，数字不可直接比对
+- `scripts/04_analysis_offline.sh rq2` explicitly reports the missing `graphs/` and degrades to
+  reporting only the parsable subset
+- `pilot/graph/ast_index.py` is a **pure stdlib** AST index (symbol definition sites, import edges,
+  graph distance) and can serve as an alternative source for the dependency graph, but the graph it
+  produces is not the same one the paper used, so the numbers are not directly comparable
 
-这个缺口不影响 RQ1 的 provenance 半边：论文 §5.3 的结论「执行来源击败代码结构」
-在丢掉代码图后样本反而从 509 个决策点扩到 7616 个（Appendix D.2），
-因为 provenance 只需要字符串归一化。
+This gap does not affect the provenance half of RQ1: the §5.3 conclusion "execution provenance
+beats code structure" actually expands from 509 decision points to 7616 once the code graph is
+dropped (Appendix D.2), because provenance only needs string normalization.
 
 ---
 
-## 6. 预算总表
+## 6. Budget summary
 
-| 阶段 | 时间 | API | 磁盘 |
+| Stage | Time | API | Disk |
 |---|---|---|---|
-| 0 冒烟 | 10–30 min | 少量 | < 1GB |
-| 1 定位 | 10–20 h（6 路并行） | ~500 长会话 | ~1.4GB + 轨迹 |
-| 2 归因 | ~12.7 h | ~3000 次续跑 | ~8.6GB（含 fork 中间产物） |
-| 3 judge | ~11 h（限流支配） | ~96 次 | < 100MB |
-| 4 分析 | 几分钟 | **0** | ~4MB |
+| 0 smoke | 10-30 min | small | < 1GB |
+| 1 localization | 10-20 h (6-way parallel) | ~500 long sessions | ~1.4GB + traces |
+| 2 attribution | ~12.7 h | ~3000 continuations | ~8.6GB (incl. fork intermediates) |
+| 3 judge | ~11 h (rate-limit dominated) | ~96 calls | < 100MB |
+| 4 analysis | minutes | **0** | ~4MB |
 
-并行度受 API 限流与磁盘 IO 双重约束。`SCAE_WORKERS=6` 是论文实际用的值：
-按 repo 分片，保证同一仓库目录同一时刻只被一个 worker reset。
-
----
-
-## 7. 复现结果如何核对
-
-论文声明每个数字都可由 CPU 脚本重新生成。核对方式：
-
-1. 跑 `scripts/04_analysis_offline.sh`，产物 JSON 落在 `$SCAE_RUNS/`
-2. 按 [docs/PAPER_MAP.md](docs/PAPER_MAP.md) 逐项比对 JSON 字段与论文数字
-3. 注意随机性来源：bootstrap CI 与置换检验会有末位波动；
-   点估计与 p 值的量级应当稳定
-
-**已知会有偏差的地方**（论文如实记录）：
-
-- 归因估计带蒙特卡洛误差，会把回归系数向 0 衰减（Appendix E.1）
-- `v_t` 在等距点而非每步估计，故 Σ Δ_t 不精确等于 v_T − v_0，论文因此**不**把可加性
-  当证据来报（Appendix E.1）
-- 熵落在粗格上（4 次重放时非零可取值只有 0.56 / 1.04 / 1.39 nats，Table 6）
+Parallelism is constrained both by API rate limits and by disk IO. `SCAE_WORKERS=6` is the value
+the paper actually used: sharded by repo, guaranteeing that the same repository directory is reset
+by only one worker at a time.
 
 ---
 
-## 8. 出问题时
+## 7. How to check reproduction results
 
-| 症状 | 多半是 |
+The paper claims every number can be regenerated by CPU scripts. How to check:
+
+1. Run `scripts/04_analysis_offline.sh`; artifact JSON lands in `$SCAE_RUNS/`
+2. Compare JSON fields against the paper's numbers item by item following
+   [docs/PAPER_MAP.md](docs/PAPER_MAP.md)
+3. Mind the sources of randomness: bootstrap CIs and permutation tests will fluctuate in the last
+   digit; the point estimates and the order of magnitude of p values should be stable
+
+**Places where deviation is known to occur** (recorded faithfully in the paper):
+
+- Attribution estimates carry Monte Carlo error, which attenuates regression coefficients toward 0
+  (Appendix E.1)
+- `v_t` is estimated at equally spaced points rather than every step, so Σ Δ_t is not exactly equal
+  to v_T − v_0; the paper therefore does **not** report additivity as evidence (Appendix E.1)
+- Entropy falls on a coarse grid (with 4 replays the only nonzero attainable values are 0.56 / 1.04
+  / 1.39 nats, Table 6)
+
+---
+
+## 8. When things go wrong
+
+| Symptom | Most likely |
 |---|---|
-| 定位成功率明显高于 93.99% | **gold patch 泄题**，仓库没 reset 干净 → `--verify-only` |
-| 重放一致性 < 1.00 | 环境没钉死 → 确认 `source pilot/config/env_pin.sh` 生效 |
-| 出现非零压缩事件 | 假设 1 在该轨迹失效，该轨迹归因不可直接采用 |
-| judge 阶段卡住 | 限流。用 `--analyze-only` 就已有数据出结论 |
-| 分析脚本报缺文件 | 上游阶段没跑完；脚本会指名缺哪个产物 |
-| 查询信道 top-3 异常低 | 已知的 `shlex` 解析缺陷（26.6% 命令段），见 Appendix D.5 |
+| Localization success rate clearly above 93.99% | **gold patch leakage**, the repository was not reset clean → `--verify-only` |
+| Replay consistency < 1.00 | environment not pinned → confirm `source pilot/config/env_pin.sh` took effect |
+| Nonzero compression events appear | assumption 1 fails on that trace; attribution for that trace cannot be used directly |
+| The judge stage hangs | rate limiting. Use `--analyze-only` to draw conclusions from the data you already have |
+| Analysis script reports missing files | an upstream stage did not finish; the script names which artifact is missing |
+| Query channel top-3 abnormally low | the known `shlex` parsing defect (26.6% of command segments), see Appendix D.5 |
 
-更多见 [docs/PITFALLS.md](docs/PITFALLS.md)。
+More in [docs/PITFALLS.md](docs/PITFALLS.md).

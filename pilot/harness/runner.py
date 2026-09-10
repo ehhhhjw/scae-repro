@@ -1,25 +1,25 @@
-"""批量文件定位 runner —— S1 的主体。
+"""Batch file-localization runner -- the core of S1.
 
-对全部 500 个 SWE-bench 加工实例跑文件定位：
-  reset 仓库 → thread/start → turn(problem_statement) → 从 rollout 解析 <answer> → 判定 Y
+Runs file localization over all 500 processed SWE-bench instances:
+  reset repo → thread/start → turn(problem_statement) → parse <answer> from the rollout → decide Y
 
-每个任务可跑 K 次（不同随机性），用于估计 U_policy 与 avg@K。
+Each task can be run K times (different randomness), for estimating U_policy and avg@K.
 
-设计
-----
-- **per-task reset**：数据集工作区叠了 gold patch，每个任务跑前强制回 base_commit。
-- **答案从 rollout 解析**（answer_from_rollout），不依赖通知字段结构。
-- **断点续跑**：已完成的 (instance, k) 记录在 results.jsonl，重启自动跳过。
-- **每任务独立 CODEX_HOME**：隔离 rollout，避免互相污染；含 idealab config.toml。
-- **并发**：每个 worker 一个 AppServer 子进程。默认串行（并发放大 API 压力，pilot 阶段先稳）。
-- **落盘**：results.jsonl 每行一条 (instance, k) 结果 + rollout 副本路径，供后续归因复用。
+Design
+------
+- **per-task reset**: the dataset workspace has the gold patch applied, so every task is forced back to base_commit before running.
+- **answer parsed from the rollout** (answer_from_rollout), not relying on the notification field structure.
+- **resumable**: completed (instance, k) pairs are recorded in results.jsonl and skipped automatically on restart.
+- **per-task CODEX_HOME**: isolates rollouts to avoid cross-contamination; includes the idealab config.toml.
+- **concurrency**: one AppServer subprocess per worker. Serial by default (concurrency amplifies API pressure; stay stable in the pilot phase).
+- **persistence**: results.jsonl holds one (instance, k) result per line plus the rollout copy path, for reuse by later attribution.
 
-用法
-----
+Usage
+-----
     python -m pilot.harness.runner \\
         --model gpt-5.5-0424-global --model-provider idealab \\
         --k 1 --limit 5 --out pilot/runs/s1
-    # 全量：--limit 0（或不传）
+    # full run: --limit 0 (or omit it)
 """
 
 from __future__ import annotations
@@ -53,12 +53,12 @@ wire_api = "{wire_api}"
 
 def write_codex_config(codex_home: Path, model: str,
                        wire_api: str = "responses") -> None:
-    """写 codex 配置。
+    """Write the codex config.
 
-    wire_api 默认 "responses"（gpt-5.5 系列用），但 qwen 系列在该端点上只支持
-    "chat"：用 responses 会在流式返回中途断连，表现为
-    `stream disconnected before completion`，且 turn 以 status=failed 结束。
-    实测 /chat/completions 对 qwen3.6-plus 返回 200，/responses 不可用。
+    wire_api defaults to "responses" (used by the gpt-5.5 family), but on that endpoint the qwen family
+    only supports "chat": with responses the stream disconnects mid-flight, showing up as
+    `stream disconnected before completion`, and the turn ends with status=failed.
+    Measured: /chat/completions returns 200 for qwen3.6-plus, /responses is unusable.
     """
     codex_home.mkdir(parents=True, exist_ok=True)
     (codex_home / "config.toml").write_text(
@@ -66,7 +66,7 @@ def write_codex_config(codex_home: Path, model: str,
 
 
 def done_keys(results_path: Path) -> set[tuple[str, int]]:
-    """已完成的 (instance_id, k)，用于断点续跑。"""
+    """Completed (instance_id, k) pairs, for resuming."""
     done: set[tuple[str, int]] = set()
     if results_path.exists():
         for line in results_path.read_text(encoding="utf-8").splitlines():
@@ -89,13 +89,13 @@ def run_one(
     model_provider: str | None,
     turn_timeout: float,
 ) -> dict:
-    """跑单个 (instance, k)。返回结构化结果记录。"""
+    """Run a single (instance, k). Returns a structured result record."""
     t0 = time.time()
     reset = T.reset_repo(inst)
     if not reset["ok"]:
         return {
             "instance_id": inst.instance_id, "k": k, "ok": False,
-            "error": f"reset 失败: {reset['reason']}", "wall_s": round(time.time() - t0, 1),
+            "error": f"reset failed: {reset['reason']}", "wall_s": round(time.time() - t0, 1),
         }
 
     started = srv.thread_start(
@@ -108,7 +108,7 @@ def run_one(
 
     run = srv.turn_run(tid, T.build_prompt(inst), timeout=turn_timeout)
 
-    # 优先从 rollout 文件解析（可靠），退化到通知文本
+    # prefer parsing from the rollout file (reliable), fall back to the notification text
     items: list[dict] = []
     if rpath and Path(rpath).exists():
         items = R.load(rpath)
@@ -119,7 +119,7 @@ def run_one(
     steps = R.steps(items) if items else []
     oc = T.outcome(ans, inst.gold)
 
-    # 保存 rollout 副本供后续归因复用
+    # save a rollout copy for reuse by later attribution
     saved = ""
     if rpath and Path(rpath).exists():
         dst = outdir / "rollouts" / f"{inst.instance_id}__k{k}.jsonl"
@@ -158,16 +158,16 @@ def main() -> int:
     ap.add_argument("--model", default="gpt-5.5-0424-global")
     ap.add_argument("--model-provider", default="idealab")
     ap.add_argument("--codex-bin", default="codex")
-    ap.add_argument("--k", type=int, default=1, help="每任务重复次数")
-    ap.add_argument("--limit", type=int, default=0, help="只跑前 N 个（0=全部 500）")
-    ap.add_argument("--instances", nargs="*", default=None, help="指定 instance_id 列表")
+    ap.add_argument("--k", type=int, default=1, help="repetitions per task")
+    ap.add_argument("--limit", type=int, default=0, help="run only the first N (0=all 500)")
+    ap.add_argument("--instances", nargs="*", default=None, help="explicit list of instance_ids")
     ap.add_argument("--out", default="pilot/runs/s1")
     ap.add_argument("--turn-timeout", type=float, default=900.0)
     ap.add_argument("--progress-every", type=int, default=10)
     args = ap.parse_args()
 
     if not os.environ.get("IDEALAB_API_KEY"):
-        print("警告: 未设置 IDEALAB_API_KEY", file=sys.stderr)
+        print("warning: IDEALAB_API_KEY is not set", file=sys.stderr)
 
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -186,7 +186,7 @@ def main() -> int:
 
     done = done_keys(results_path)
     todo = [(i, k) for i in insts for k in range(args.k) if (i.instance_id, k) not in done]
-    print(f"实例 {len(insts)} × K={args.k} = {len(insts) * args.k} 次；已完成 {len(done)}；待跑 {len(todo)}")
+    print(f"instances {len(insts)} × K={args.k} = {len(insts) * args.k} runs; done {len(done)}; todo {len(todo)}")
 
     srv = AppServer(
         codex_bin=args.codex_bin, codex_home=codex_home,
@@ -217,12 +217,12 @@ def main() -> int:
                 if n_done % args.progress_every == 0 or n_done == len(todo):
                     rate = n_y / n_ok if n_ok else 0
                     eta = (time.time() - t_start) / n_done * (len(todo) - n_done)
-                    print(f"[{n_done}/{len(todo)}] ok={n_ok} 成功定位率={rate:.2%} "
+                    print(f"[{n_done}/{len(todo)}] ok={n_ok} localization_rate={rate:.2%} "
                           f"ETA={eta/60:.1f}min", flush=True)
     finally:
         srv.close()
 
-    # 汇总
+    # summary
     _summarize(results_path, outdir)
     return 0
 
@@ -261,13 +261,13 @@ def _summarize(results_path: Path, outdir: Path) -> None:
     (outdir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    print("\n=== 汇总 ===")
-    print(f"完成 {summary['n_ok']}/{summary['n_total']}  错误 {summary['n_error']}")
-    print(f"成功定位率 (Y=1): {summary['solve_rate']}")
-    print(f"答案解析率: {summary['parse_rate']}")
-    print(f"平均步数: {summary['mean_steps']}  平均墙钟: {summary['mean_wall_s']}s")
-    print(f"含压缩事件的 run: {summary['n_with_compaction']}")
-    print("按 repo 成功率:")
+    print("\n=== summary ===")
+    print(f"done {summary['n_ok']}/{summary['n_total']}  errors {summary['n_error']}")
+    print(f"localization rate (Y=1): {summary['solve_rate']}")
+    print(f"answer parse rate: {summary['parse_rate']}")
+    print(f"mean steps: {summary['mean_steps']}  mean wall clock: {summary['mean_wall_s']}s")
+    print(f"runs with compaction events: {summary['n_with_compaction']}")
+    print("solve rate by repo:")
     for p, s in summary["by_project"].items():
         print(f"  {p:<14} n={s['n']:<4} solve={s['solve_rate']}")
 

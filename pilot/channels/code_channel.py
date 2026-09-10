@@ -1,28 +1,28 @@
-r"""通道 B：代码关系 → U^obj。消费按仓库隔离的构图/聚类产物。零 API。
+r"""Channel B: code relations → U^obj. Consumes per-repository graph/cluster artifacts. Zero API.
 
-输入（pilot/runs/graphs/<instance_id>/）
---------------------------------------
-  entities.json            实体 + Dependent 关系 + LineNumber
-  dependency_graph.json    文件级 import 图
-  cluster_entities.json    每实体 CommunityId
-  cluster_communities.json 社区级 cut_ratio / boundary_weight
+Inputs (pilot/runs/graphs/<instance_id>/)
+-----------------------------------------
+  entities.json            entities + Dependent relations + LineNumber
+  dependency_graph.json    file-level import graph
+  cluster_entities.json    CommunityId per entity
+  cluster_communities.json community-level cut_ratio / boundary_weight
 
-U^obj 的定义
------------
-agent 在第 t 步操作对象 obj_t（文件路径）。下一步对象的候选按结构分三层：
+Definition of U^obj
+-------------------
+At step t the agent operates on object obj_t (a file path). Next-step object candidates split structurally into three layers:
 
-  L1 一跳邻居    dependency_graph 上与 obj_t 直接相连的文件
-  L2 同社区      与 obj_t 同 CommunityId 的文件
-  L3 跨社区      其余文件（按社区 boundary_weight 加权）
+  L1 one-hop neighbors  files directly linked to obj_t in dependency_graph
+  L2 same community     files sharing obj_t's CommunityId
+  L3 cross-community    all remaining files (weighted by community boundary_weight)
 
 $U^{obj}_t = H\big(P(\text{obj}_{t+1} \mid \text{obj}_t, G)\big)$
 
-其中 P 由三层的**结构先验**给出（不拟合、不看标签）：
-    P(L1 内均匀) * w1 + P(L2 内均匀) * w2 + P(L3 内均匀) * w3
-权重 w 反映"agent 倾向于就近移动"，由 E3 的实证支撑：
-548 个 py→py 相邻步对中 62% 在一跳内、97% 在 3 跳内（中位距离 1）。
+where P comes from the **structural prior** over the three layers (no fitting, no labels):
+    P(uniform within L1) * w1 + P(uniform within L2) * w2 + P(uniform within L3) * w3
+The weights w reflect "the agent tends to move nearby", supported empirically by E3:
+of 548 adjacent py→py step pairs, 62% are within one hop and 97% within 3 hops (median distance 1).
 
-这样 U^obj 完全由代码结构决定，与成败标签无关 —— 这是绕开 94% 基线率的关键。
+U^obj is thus determined entirely by code structure, independent of the outcome label -- this is the key to sidestepping the 94% base rate.
 """
 
 from __future__ import annotations
@@ -36,12 +36,12 @@ from pathlib import Path
 SCAE = Path(__file__).resolve().parents[2]
 GRAPHS = SCAE / "pilot" / "runs" / "graphs"
 
-# 由 E3 实测的相邻步图距离分布定出的层权重（62% 一跳 / 中位 1 / 97% 三跳内）
+# Layer weights fixed by the E3-measured adjacent-step graph distance distribution (62% one hop / median 1 / 97% within three hops)
 W_L1, W_L2, W_L3 = 0.62, 0.30, 0.08
 
 
 class CodeGraph:
-    """单仓库的代码关系视图。"""
+    """Code-relation view of a single repository."""
 
     def __init__(self, instance_id: str):
         self.instance_id = instance_id
@@ -57,7 +57,7 @@ class CodeGraph:
         self._load_dep(d / "dependency_graph.json")
         self._load_cluster(d / "cluster_entities.json", d / "cluster_communities.json")
 
-    # ---------------- 载入 ----------------
+    # ---------------- loading ----------------
 
     def _load_dep(self, p: Path) -> None:
         try:
@@ -87,7 +87,7 @@ class CodeGraph:
             for dep in deps:
                 if dep and dep != path:
                     self.edges[path].add(dep)
-                    self.edges[dep].add(path)      # 视为无向，反映"可达"
+                    self.edges[dep].add(path)      # treated as undirected, reflecting "reachability"
                     self.files.add(dep)
 
     def _load_cluster(self, ents: Path, comms: Path) -> None:
@@ -115,7 +115,7 @@ class CodeGraph:
             except (OSError, json.JSONDecodeError):
                 pass
 
-    # ---------------- 查询 ----------------
+    # ---------------- queries ----------------
 
     @lru_cache(maxsize=4096)
     def neighbors(self, f: str) -> frozenset[str]:
@@ -128,15 +128,15 @@ class CodeGraph:
         return frozenset(self.comm_files.get(cid, set()) - {f})
 
     def resolve(self, obj: str | None) -> str | None:
-        """把 agent 的操作对象解析到图节点。
+        """Resolve the agent's operated object to a graph node.
 
-        V4 首轮诊断发现 U_obj 缺失 63%，主因不是数据缺失而是对象抽取过窄：
-          - search 类动作只有 query 没有 path（67 个观测）
-          - list_files 的目标是目录而非文件（62 个观测）
-        这里补三条解析路径，把覆盖率提上去：
-          1. 精确匹配文件
-          2. 目录 → 该目录下所有文件的并集视为"目录节点"
-          3. query 字符串 → 在符号名/文件名里做后缀匹配
+        The first V4 diagnostic found U_obj missing 63% of the time; the main cause was not missing data but overly narrow object extraction:
+          - search actions carry only a query, no path (67 observations)
+          - list_files targets a directory rather than a file (62 observations)
+        Three resolution paths are added here to raise coverage:
+          1. exact file match
+          2. directory → the union of all files under it is treated as a "directory node"
+          3. query string → suffix match against symbol names / file names
         """
         if not obj or obj == "-" or not self.ok:
             return None
@@ -145,10 +145,10 @@ class CodeGraph:
         o = obj.lstrip("./").rstrip("/")
         if o in self.files:
             return o
-        # 目录：返回一个虚拟目录节点（其邻域=目录下文件）
+        # directory: return a virtual directory node (its neighborhood = files under it)
         if any(x.startswith(o + "/") for x in self.files):
             return f"dir:{o}"
-        # query：后缀匹配文件名
+        # query: suffix match on the file name
         if o.startswith("q:"):
             q = o[2:].strip("'\"")
             if len(q) >= 4:
@@ -167,16 +167,16 @@ class CodeGraph:
         return frozenset(x for x in self.files if x.startswith(d + "/"))
 
     def u_obj_resolved(self, obj: str | None) -> dict:
-        """先 resolve 再算 U_obj，支持目录节点。"""
+        """Resolve first, then compute U_obj; supports directory nodes."""
         node = self.resolve(obj)
         if node is None:
-            return {"H": None, "reason": "无法解析到图节点", "resolved": None}
+            return {"H": None, "reason": "cannot resolve to a graph node", "resolved": None}
         if node.startswith("dir:"):
             d = node[4:]
             members = self._dir_members(d)
             if not members:
-                return {"H": None, "reason": "空目录", "resolved": node}
-            # 目录节点：候选=目录内文件（L1）+ 同社区（L2）+ 其余（L3）
+                return {"H": None, "reason": "empty directory", "resolved": node}
+            # directory node: candidates = files in the dir (L1) + same community (L2) + rest (L3)
             n_all = len(self.files)
             L1 = members
             cids = {self.community.get(m) for m in members} - {None}
@@ -188,7 +188,7 @@ class CodeGraph:
                 if size > 0:
                     ps += [w / size] * size
             if not ps:
-                return {"H": None, "reason": "无候选", "resolved": node}
+                return {"H": None, "reason": "no candidates", "resolved": node}
             z = sum(ps)
             H = -sum((p / z) * math.log(p / z) for p in ps if p > 0)
             return {"H": round(H, 4), "n_l1": len(L1), "n_l2": len(L2),
@@ -199,12 +199,12 @@ class CodeGraph:
         return r
 
     def u_obj(self, f: str) -> dict:
-        """结构不确定性：下一步对象分布的熵，由三层结构先验给出。
+        """Structural uncertainty: entropy of the next-object distribution, given by the three-layer structural prior.
 
-        返回 H 及三层规模，便于分解分析。H 越大表示"下一步可去的地方越多"。
+        Returns H plus the three layer sizes, for decomposition analysis. Larger H means "more places the next step can go".
         """
         if not self.ok or not self.files:
-            return {"H": None, "reason": "无图数据"}
+            return {"H": None, "reason": "no graph data"}
         n_all = len(self.files)
         L1 = self.neighbors(f)
         L2 = self.same_community(f) - L1
@@ -214,7 +214,7 @@ class CodeGraph:
             if size > 0:
                 ps += [w / size] * size
         if not ps:
-            return {"H": None, "reason": "对象不在图中或无候选",
+            return {"H": None, "reason": "object not in graph or no candidates",
                     "n_l1": len(L1), "n_l2": len(L2), "n_l3": L3n}
         z = sum(ps)
         H = -sum((p / z) * math.log(p / z) for p in ps if p > 0)

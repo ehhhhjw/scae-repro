@@ -1,38 +1,42 @@
 #!/usr/bin/env python3
-"""从磁盘残留数据回收崩溃掉的 V5 熵探针报告（只读、零 API 成本）。
+"""Recover the crashed V5 entropy probe report from leftover on-disk data (read-only, zero API cost).
 
-背景
-----
-`pilot/smoke/probe_v5.py` 只在 main() 末尾才写 `v5_report.json`，所以进程中途崩溃
-会把已经花掉的 fork 采样全部丢失。但采样本身是持久化的：每次 `thread_fork` +
-`turn_run` 都会在 `<outdir>/codex_home/sessions/YYYY/MM/DD/rollout-*.jsonl` 落一条
-完整的续跑 rollout。本脚本把这些残留 rollout 重新归组到各个 fork 点，复用
-`pilot.harness.rollout` 的 `steps()` / `action_bucket()` 重算分布与熵，产出与
-正常跑完时同构的 `v5_report.json`。
+Background
+----------
+`pilot/smoke/probe_v5.py` writes `v5_report.json` only at the very end of main(), so a crash midway
+throws away every fork sample already paid for. But the samples themselves are persisted: each
+`thread_fork` + `turn_run` drops one complete continuation rollout at
+`<outdir>/codex_home/sessions/YYYY/MM/DD/rollout-*.jsonl`. This script regroups those leftover rollouts
+back onto their fork points and reuses `pilot.harness.rollout`'s `steps()` / `action_bucket()` to
+recompute the distributions and entropies, producing a `v5_report.json` isomorphic to the one a
+successful run would have written.
 
-归组判据（结构性，不用时间戳）
-------------------------------
-`probe_v5` 在 fork 点 k 处用 `truncate_before_step(base, k)` 造前缀，该前缀恰好含
-k-1 个步骤。fork 出来的续跑 rollout 会原样带上这段前缀，然后追加第 k 步。于是：
+Grouping criterion (structural, no timestamps)
+----------------------------------------------
+At fork point k, `probe_v5` builds the prefix with `truncate_before_step(base, k)`, and that prefix
+contains exactly k-1 steps. The forked continuation rollout carries that prefix verbatim and then
+appends step k. Hence:
 
-    m := 该 rollout 与 base rollout 的**最长公共步骤前缀长度**（按 call_id 逐一比对）
+    m := the **length of the longest common step prefix** between this rollout and the base rollout
+         (compared call_id by call_id)
     k  = m + 1
 
-call_id 是模型侧生成的随机串，续跑不可能重现 base 的 call_id，所以 m 是良定义的。
-再加两道硬校验：
-  1. 每个 `prefix_kN.jsonl` 必须逐行等于 `truncate_before_step(base, N)`
-     —— 确认我们找对了 base rollout；
-  2. 每条 rollout 的前 k-1 步对应的 response_item 序列必须等于 `prefix_k{k}.jsonl`
-     的 response_item 序列（忽略 codex 重新序列化 `reasoning.content` 造成的差异）。
+call_id is a random string generated model-side, so a continuation can never reproduce the base's
+call_id; m is therefore well defined. Plus two hard checks:
+  1. every `prefix_kN.jsonl` must equal `truncate_before_step(base, N)` line by line
+     -- confirming we found the right base rollout;
+  2. the response_item sequence for the first k-1 steps of each rollout must equal the response_item
+     sequence of `prefix_k{k}.jsonl` (ignoring differences caused by codex re-serializing
+     `reasoning.content`).
 
-任何一条 rollout 归不到已声明的 fork 点，或校验不过，脚本直接失败退出而**不写
-任何输出**。宁可回收失败，也不产出猜测出来的数字。
+If any rollout cannot be grouped onto a declared fork point, or fails a check, the script exits with a
+failure and writes **no output at all**. Better to fail recovery than to emit guessed numbers.
 
-时间戳只用于同一 fork 点内部的样本排序（probe_v5 的采样循环是严格串行的），
-不参与归组。
+Timestamps are used only to order samples within a single fork point (probe_v5's sampling loop is
+strictly serial); they play no part in grouping.
 
-用法
-----
+Usage
+-----
     python3 -m pilot.analyze.recover_v5_report \\
         --run-dir pilot/runs/v5_scan/django__django-10097
 """
@@ -54,11 +58,11 @@ from pilot.probes import task as T          # noqa: E402
 
 
 class Unrecoverable(RuntimeError):
-    """数据不足以可靠归组。调用方应如实报告失败，不得回退到猜测。"""
+    """Data insufficient for reliable grouping. Callers must report the failure honestly, never fall back to guessing."""
 
 
 # ---------------------------------------------------------------------------
-# 与 probe_v5 逐字一致的统计口径（不要在这里"改进"，否则新旧报告不可比）
+# Statistics defined verbatim as in probe_v5 (do not "improve" here, or old and new reports become incomparable)
 # ---------------------------------------------------------------------------
 
 def entropy(counts: Counter) -> float:
@@ -80,14 +84,14 @@ def first_action_after(items_after: list[dict], k: int, repo: Path) -> str | Non
 
 
 # ---------------------------------------------------------------------------
-# 结构比对
+# Structural comparison
 # ---------------------------------------------------------------------------
 
 def _canon_response_items(items: list[dict]) -> list[dict]:
-    """取出 response_item 的 payload，抹掉 fork 重新序列化引入的噪声字段。
+    """Take the response_item payloads, stripping the noise fields introduced by fork re-serialization.
 
-    实测唯一差异：`reasoning` payload 在 fork 后的 rollout 里多一个 `content` 键
-    （原 rollout 里没有）。其余字段逐字相同。
+    The only observed difference: the `reasoning` payload in post-fork rollouts carries an extra `content`
+    key (absent from the original rollout). All other fields are identical verbatim.
     """
     out = []
     for it in items:
@@ -119,7 +123,7 @@ def _sort_key(p: Path) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# base rollout 定位（带校验的发现，不是猜测）
+# base rollout localization (verified discovery, not guesswork)
 # ---------------------------------------------------------------------------
 
 def _prefixes_match(base_items: list[dict], prefix_files: dict[int, Path]) -> bool:
@@ -138,9 +142,9 @@ def discover_base(repo_root: Path, instance: str, prefix_files: dict[int, Path],
     if explicit:
         p = Path(explicit)
         if not p.exists():
-            raise Unrecoverable(f"--base 指向的文件不存在: {p}")
+            raise Unrecoverable(f"the file --base points to does not exist: {p}")
         if not _prefixes_match(R.load(p), prefix_files):
-            raise Unrecoverable(f"--base {p} 与 prefix_k*.jsonl 不一致，不是这次探针用的 base rollout")
+            raise Unrecoverable(f"--base {p} disagrees with prefix_k*.jsonl; it is not the base rollout this probe used")
         return p
 
     cands = sorted(set(repo_root.glob(f"pilot/runs/**/{instance}__k*.jsonl"))
@@ -148,15 +152,15 @@ def discover_base(repo_root: Path, instance: str, prefix_files: dict[int, Path],
     hits = [c for c in cands if _prefixes_match(R.load(c), prefix_files)]
     if not hits:
         raise Unrecoverable(
-            f"在 pilot/runs 下找不到与 {instance} 的 prefix_k*.jsonl 一致的 base rollout"
-            f"（试过 {len(cands)} 个候选）。请用 --base 显式指定。")
+            f"no base rollout under pilot/runs agrees with {instance}'s prefix_k*.jsonl"
+            f" (tried {len(cands)} candidates). Specify one explicitly with --base.")
     if len({json.dumps(R.load(h), sort_keys=True) for h in hits}) > 1:
-        raise Unrecoverable(f"找到多个内容不同的 base rollout 候选: {[str(h) for h in hits]}")
+        raise Unrecoverable(f"found multiple base rollout candidates with differing content: {[str(h) for h in hits]}")
     return hits[0]
 
 
 # ---------------------------------------------------------------------------
-# 主流程
+# Main flow
 # ---------------------------------------------------------------------------
 
 def recover(run_dir: Path, repo_root: Path, instance: str | None,
@@ -169,7 +173,7 @@ def recover(run_dir: Path, repo_root: Path, instance: str | None,
         if m:
             prefix_files[int(m.group(1))] = pf
     if not prefix_files:
-        raise Unrecoverable(f"{run_dir} 下没有 prefix_k*.jsonl，无法知道探测过哪些 fork 点")
+        raise Unrecoverable(f"no prefix_k*.jsonl under {run_dir}; cannot tell which fork points were probed")
     fork_steps = sorted(prefix_files)
 
     base = discover_base(repo_root, instance, prefix_files, base_path)
@@ -177,18 +181,18 @@ def recover(run_dir: Path, repo_root: Path, instance: str | None,
     base_steps = R.steps(base_items)
     base_ids = [s.call_id for s in base_steps]
     if any(i is None for i in base_ids):
-        raise Unrecoverable("base rollout 里存在没有 call_id 的步骤，无法做结构归组")
+        raise Unrecoverable("the base rollout contains steps without a call_id; structural grouping is impossible")
     if len(set(base_ids)) != len(base_ids):
-        raise Unrecoverable("base rollout 里 call_id 有重复，最长公共前缀不再良定义")
+        raise Unrecoverable("the base rollout has duplicate call_ids; the longest common prefix is no longer well defined")
 
     repo = T.PROJECTS_ROOT / instance
 
     sessions_dir = run_dir / "codex_home" / "sessions"
     if not sessions_dir.is_dir():
-        raise Unrecoverable(f"没有 {sessions_dir}，fork 出来的续跑 rollout 不在磁盘上，不可回收")
+        raise Unrecoverable(f"{sessions_dir} missing; the forked continuation rollouts are not on disk, unrecoverable")
     session_files = sorted(sessions_dir.rglob("rollout-*.jsonl"), key=_sort_key)
     if not session_files:
-        raise Unrecoverable(f"{sessions_dir} 下没有 rollout-*.jsonl，不可回收")
+        raise Unrecoverable(f"no rollout-*.jsonl under {sessions_dir}, unrecoverable")
 
     prefix_canon = {k: _canon_response_items(R.load(p)) for k, p in prefix_files.items()}
 
@@ -200,15 +204,15 @@ def recover(run_dir: Path, repo_root: Path, instance: str | None,
         k = m + 1
         if k not in groups:
             raise Unrecoverable(
-                f"{sp} 与 base 的公共步骤前缀长度 {m} → k={k}，不在已声明的 fork 点 "
-                f"{fork_steps} 里。无法可靠归组，拒绝猜测。")
-        # 硬校验：前 k-1 步对应的 response_item 序列必须等于 prefix_k{k}
+                f"{sp} has a common step prefix of length {m} with base → k={k}, which is not among the "
+                f"declared fork points {fork_steps}. Cannot group reliably; refusing to guess.")
+        # Hard check: the response_item sequence for the first k-1 steps must equal prefix_k{k}
         want = prefix_canon[k]
         got = _canon_response_items(items)[: len(want)]
         if json.dumps(got, sort_keys=True) != json.dumps(want, sort_keys=True):
             raise Unrecoverable(
-                f"{sp} 归到 k={k}，但其前缀 response_item 序列与 prefix_k{k}.jsonl 不一致，"
-                f"拒绝采信。")
+                f"{sp} was grouped to k={k}, but its prefix response_item sequence disagrees with "
+                f"prefix_k{k}.jsonl; refusing to trust it.")
         groups[k].append(sp)
 
     per_step = []
@@ -225,12 +229,12 @@ def recover(run_dir: Path, repo_root: Path, instance: str | None,
             if fa:
                 actions.append(fa)
             else:
-                errors.append(f"s{i}: 未采到第{k}步动作")
+                errors.append(f"s{i}: step {k} action not collected")
         n_found = len(groups[k])
         if samples_expected and n_found < samples_expected:
             errors.append(
-                f"[recovered] 磁盘上只有 {n_found}/{samples_expected} 个样本"
-                f"（探针在此 fork 点崩溃）")
+                f"[recovered] only {n_found}/{samples_expected} samples on disk"
+                f" (the probe crashed at this fork point)")
 
         counts = Counter(actions)
         per_step.append({
@@ -245,7 +249,7 @@ def recover(run_dir: Path, repo_root: Path, instance: str | None,
             "errors": errors,
         })
 
-    # wall_s 无法从崩溃的进程恢复：用残留 rollout 的时间戳跨度做下界估计。
+    # wall_s cannot be recovered from a crashed process: use the leftover rollouts' timestamp span as a lower bound.
     stamps = [_sort_key(p)[0] for p in session_files if _sort_key(p)[0]]
     wall_s = None
     if len(stamps) >= 2:
@@ -266,14 +270,14 @@ def recover(run_dir: Path, repo_root: Path, instance: str | None,
         "verdict": {
             "any_step_has_positivity": any_ok,
             "conclusion": (
-                "至少一个 fork 点有动作随机性 → fork-resample 可估计 v_t，主线成立"
+                "at least one fork point shows action randomness → fork-resample can estimate v_t, main line holds"
                 if any_ok else
-                "所有 fork 点动作熵均为 0 → positivity 失效 → 改软干预路线，估计量需重写"
+                "action entropy is 0 at every fork point → positivity fails → switch to the soft-intervention route, the estimator must be rewritten"
             ),
         },
         "recovery": {
             "recovered_from_disk": True,
-            "reason": "probe_v5 崩溃，未写出 v5_report.json；从残留 fork rollout 重算",
+            "reason": "probe_v5 crashed without writing v5_report.json; recomputed from the leftover fork rollouts",
             "base_rollout": str(base),
             "n_session_rollouts": len(session_files),
             "grouping": {str(k): [p.name for p in groups[k]] for k in fork_steps},
@@ -284,33 +288,33 @@ def recover(run_dir: Path, repo_root: Path, instance: str | None,
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-dir", required=True, help="探针输出目录，如 pilot/runs/v5_scan/<instance>")
+    ap.add_argument("--run-dir", required=True, help="probe output directory, e.g. pilot/runs/v5_scan/<instance>")
     ap.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[2]))
-    ap.add_argument("--instance", default=None, help="默认取 run-dir 目录名")
-    ap.add_argument("--base", default=None, help="base rollout 路径；不传则在 pilot/runs 下带校验搜索")
+    ap.add_argument("--instance", default=None, help="defaults to the run-dir directory name")
+    ap.add_argument("--base", default=None, help="base rollout path; if omitted, search under pilot/runs with verification")
     ap.add_argument("--samples", type=int, default=None,
-                    help="原探针的 --samples；用于标注缺样本的 fork 点")
-    ap.add_argument("--out", default=None, help="默认 <run-dir>/v5_report.json")
-    ap.add_argument("--force", action="store_true", help="允许覆盖已存在的 v5_report.json")
+                    help="the original probe's --samples; used to flag fork points with missing samples")
+    ap.add_argument("--out", default=None, help="defaults to <run-dir>/v5_report.json")
+    ap.add_argument("--force", action="store_true", help="allow overwriting an existing v5_report.json")
     args = ap.parse_args()
 
     run_dir = Path(args.run_dir)
     out = Path(args.out) if args.out else run_dir / "v5_report.json"
     if out.exists() and not args.force:
-        print(f"[拒绝] {out} 已存在。本脚本不覆盖已有报告（加 --force 才允许）。", file=sys.stderr)
+        print(f"[refused] {out} already exists. This script does not overwrite existing reports (pass --force to allow).", file=sys.stderr)
         return 2
 
     try:
         report = recover(run_dir, Path(args.repo_root), args.instance, args.base, args.samples)
     except Unrecoverable as exc:
-        print(f"[不可回收] {exc}", file=sys.stderr)
+        print(f"[unrecoverable] {exc}", file=sys.stderr)
         return 1
 
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"已回收 → {out}")
+    print(f"recovered → {out}")
     print(f"base rollout: {report['recovery']['base_rollout']}  "
           f"n_steps={report['rollout_n_steps']}  "
-          f"残留 rollout {report['recovery']['n_session_rollouts']} 条")
+          f"leftover rollouts: {report['recovery']['n_session_rollouts']}")
     for s in report["per_step"]:
         print(f"[k={s['fork_step']}] distinct={s['n_distinct']}/{s['n_samples']} "
               f"H={s['entropy_nats']} nats  positivity_ok={s['positivity_ok']}")
@@ -318,7 +322,7 @@ def main() -> int:
             print(f"      {c:>2}x  {a}")
         for e in s["errors"]:
             print(f"      ! {e}")
-    print(f"\n裁决: {report['verdict']['conclusion']}")
+    print(f"\nverdict: {report['verdict']['conclusion']}")
     return 0
 
 

@@ -1,22 +1,24 @@
-"""R6：m 的选择是否需要辩护 —— m=3 与 m=8 的 Δ_t 排序稳健性。
+"""R6: does the choice of m need defending -- robustness of the Δ_t ranking between m=3 and m=8.
 
-动机（借鉴 RFEval 为超参辩护的做法）
-------------------------------------
-主实验用 m=3 是成本妥协，但论文只主张**排序类结论**（哪一步最关键、
-judge 与因果归因是否指向同一步）。若 m=3 与 m=8 给出的 Δ_t 排序高度相关，
-则小 m 足以支撑排序类结论，"成本妥协"就变成"有辩护的选择"。
+Motivation (borrowing RFEval's practice of defending hyperparameters)
+---------------------------------------------------------------------
+The main experiment uses m=3 as a cost compromise, but the paper only claims
+**ranking-type conclusions** (which step is most critical, whether the judge and causal
+attribution point at the same step). If the Δ_t rankings from m=3 and m=8 are highly
+correlated, then a small m suffices to support ranking-type conclusions, and the "cost
+compromise" becomes "a defensible choice".
 
-做法
-----
-在同一批 case 上比较 m=3（full_attr）与 m=8（m8）的：
-  1. Δ_t 序列的 Spearman 秩相关（逐 case 计算，再报分布）
-  2. top-1 步是否一致（这是论文实际依赖的量）
-  3. Δ 的绝对值是否随 m 增大而收缩（Monte Carlo 噪声减少的预期表现）
+Method
+------
+On the same batch of cases, compare m=3 (full_attr) against m=8 (m8) on:
+  1. Spearman rank correlation of the Δ_t sequences (computed per case, then report the distribution)
+  2. whether the top-1 step agrees (this is the quantity the paper actually relies on)
+  3. whether |Δ| shrinks as m grows (the expected signature of reduced Monte Carlo noise)
 
-判据
-----
-  top-1 一致率高 且 Spearman 中位数 > 0.5 → m=3 足以支撑排序结论
-  否则 → 必须提高 m，或把结论降级为探索性
+Criterion
+---------
+  high top-1 agreement AND median Spearman > 0.5 -> m=3 suffices to support ranking conclusions
+  otherwise -> m must be raised, or the conclusions downgraded to exploratory
 """
 
 from __future__ import annotations
@@ -83,9 +85,9 @@ def main() -> int:
     for p in Path().glob(args.m8_glob):
         a8.update(load(p))
     common = sorted(set(a3) & set(a8))
-    print(f"m=3: {len(a3)} case, m=8: {len(a8)} case, 重叠 {len(common)}")
+    print(f"m=3: {len(a3)} cases, m=8: {len(a8)} cases, overlap {len(common)}")
     if not common:
-        print("无重叠 case，无法做 R6")
+        print("no overlapping cases, cannot run R6")
         return 0
 
     rows = []
@@ -130,26 +132,26 @@ def main() -> int:
     med = res["spearman_median"]
     agr = res["top1_agreement"]
     res["verdict"] = (
-        "数据不足" if med is None or agr is None else
-        f"top-1 一致率 {agr:.0%}、Spearman 中位 {med:.2f} → "
-        + ("m=3 足以支撑排序类结论，可为该选择辩护"
+        "insufficient data" if med is None or agr is None else
+        f"top-1 agreement {agr:.0%}, median Spearman {med:.2f} → "
+        + ("m=3 suffices to support ranking-type conclusions; the choice is defensible"
            if agr >= 0.5 and med >= 0.5 else
-           "m=3 的排序不稳健，排序类结论须降级为探索性或提高 m")
+           "the m=3 ranking is not robust; ranking-type conclusions must be downgraded to exploratory or m raised")
     )
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    print(f"\n=== R6 m 稳健性（重叠 {len(common)} case）===")
-    print(f"  Spearman 中位 {res['spearman_median']}  均值 {res['spearman_mean']}"
+    print(f"\n=== R6 m robustness (overlap {len(common)} cases) ===")
+    print(f"  median Spearman {res['spearman_median']}  mean {res['spearman_mean']}"
           f"  (n={len(rhos)})")
-    print(f"  top-1 一致率 {res['top1_agreement']}  (n={len(top1_same)})")
-    print(f"  |Δ| 均值 m3={res['mean_abs_delta']['m3']}  m8={res['mean_abs_delta']['m8']}")
-    print("\n逐 case:")
+    print(f"  top-1 agreement {res['top1_agreement']}  (n={len(top1_same)})")
+    print(f"  mean |Δ| m3={res['mean_abs_delta']['m3']}  m8={res['mean_abs_delta']['m8']}")
+    print("\nper case:")
     for r in rows:
         print(f"  {r['instance_id'][:28]:<28} Y={r['Y']} pts={r['n_shared_points']} "
               f"rho={r['spearman']} top1: {r['top1_m3']}->{r['top1_m8']} "
               f"{'same' if r['top1_same'] else 'diff' if r['top1_same'] is not None else '-'}")
-    print(f"\n裁决: {res['verdict']}")
+    print(f"\nverdict: {res['verdict']}")
     print(f"\n→ {args.out}")
     return 0
 

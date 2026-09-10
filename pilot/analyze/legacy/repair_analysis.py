@@ -1,28 +1,31 @@
-"""E1 修复实验分析 —— 主判据为 Δmean recall，非二元 succ。
+"""E1 repair experiment analysis -- primary criterion is Δmean recall, not binary succ.
 
-度量设计修正
-------------
-E1 前 4 条暴露：succ（要求 recall=1.0）在多文件任务上过于严苛。
-django-13344 的 mean recall 从 0.5(none) 升到 0.667(top1) 是实质改善，
-但 succ 全为 0，信号被完全丢弃。这重演了早先 outcome 口径的错误
-（严格集合相等 vs recall），故主判据必须用连续量。
+Metric design correction
+------------------------
+The first 4 E1 cases exposed: succ (requires recall=1.0) is too strict on multi-file tasks.
+django-13344's mean recall rising from 0.5(none) to 0.667(top1) is a substantive improvement,
+but succ is 0 throughout and the signal is discarded entirely. This replays the earlier
+outcome-definition mistake (strict set equality vs recall), so the primary criterion must be
+a continuous quantity.
 
-三个对比
---------
-  主判据      mean(top1_missed) − mean(none)
-  位置特异性  mean(top1_missed) − mean(rand_missed)
-  内容特异性  mean(top1_missed) − mean(top1_irrelev)
-另加两个 sham 对比（rand/irrelev vs none），用于判断"任何注入是否都有效"。
+Three contrasts
+---------------
+  primary criterion     mean(top1_missed) − mean(none)
+  position specificity  mean(top1_missed) − mean(rand_missed)
+  content specificity   mean(top1_missed) − mean(top1_irrelev)
+Plus two sham contrasts (rand/irrelev vs none), to judge "whether any injection works".
 
-关键读法
---------
-若三个干预臂彼此接近且都高于 none → 提升来自"注入任何内容"，归因特异性不成立。
-若 irrelev 显著低于其他臂 → 内容对照臂在起作用，注入并非等价（sphinx-7590 即此例）。
+How to read this
+----------------
+If the three intervention arms are close to each other and all above none → the gain comes from
+"injecting any content", attribution specificity does not hold.
+If irrelev is markedly below the other arms → the content control arm is doing work, injections
+are not equivalent (sphinx-7590 is such a case).
 
-统计方法（RFEval R4）
---------------------
-配对置换检验（翻转符号，B=2e4），小样本下比 bootstrap 可靠且无分布假设；
-差值另报 bootstrap CI 便于阅读。
+Statistical method (RFEval R4)
+------------------------------
+Paired permutation test (sign flipping, B=2e4), more reliable than bootstrap at small n and free
+of distributional assumptions; the difference additionally gets a bootstrap CI for readability.
 """
 
 from __future__ import annotations
@@ -42,11 +45,11 @@ ARMS = ["none", "top1_missed", "rand_missed", "top1_irrelev"]
 
 def paired_perm_test(a: list[float], b: list[float], B: int = 20000,
                      seed: int = 23) -> dict:
-    """配对置换检验：随机翻转每对差值的符号，检验 mean(a−b) != 0。"""
+    """Paired permutation test: randomly flip the sign of each paired difference, test mean(a−b) != 0."""
     d = [x - y for x, y in zip(a, b)]
     n = len(d)
     if n < 3:
-        return {"n": n, "note": "样本不足"}
+        return {"n": n, "note": "insufficient samples"}
     obs = statistics.mean(d)
     rng = np.random.default_rng(seed)
     arr = np.asarray(d, dtype=float)
@@ -75,13 +78,13 @@ def main() -> int:
 
     p = Path(args.repair)
     if not p.exists():
-        print("尚无 repair 结果")
+        print("no repair results yet")
         return 0
     recs = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
     recs = [r for r in recs if not r.get("error")
             and all(f"mean_{a}" in r for a in ARMS)]
     if len(recs) < 3:
-        print(f"完整四臂记录仅 {len(recs)} 条，等更多数据")
+        print(f"only {len(recs)} complete four-arm records, waiting for more data")
         return 0
 
     means = {a: [r[f"mean_{a}"] for r in recs] for a in ARMS}
@@ -114,24 +117,24 @@ def main() -> int:
     res["intervention_arms_spread"] = spread
     res["fragile_failure_cases"] = sum(1 for v in means["none"] if v >= 0.999)
     if spread < 0.02 and iv["top1_missed"] > base + 0.02:
-        diag = ("三干预臂差异 <0.02 且均高于 none → 提升来自『注入任何内容』，"
-                "归因特异性未获支持")
+        diag = ("three intervention arms differ by <0.02 and all exceed none → the gain comes from "
+                "\"injecting any content\", attribution specificity is not supported")
     elif iv["top1_irrelev"] < min(iv["top1_missed"], iv["rand_missed"]) - 0.05:
-        diag = ("无关内容臂显著更低 → 内容对照生效，注入并非等价；"
-                "可进一步检验位置特异性")
+        diag = ("irrelevant-content arm markedly lower → content control is effective, injections "
+                "are not equivalent; position specificity can be tested further")
     else:
-        diag = "干预臂间存在差异，需更多样本判定特异性"
+        diag = "intervention arms differ; more samples needed to determine specificity"
     res["diagnosis"] = diag
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    print(f"=== E1 修复实验（n={len(recs)}）===")
-    print(f"{'臂':<16}{'mean recall':>13}{'CI95':>20}{'succ':>8}")
+    print(f"=== E1 repair experiment (n={len(recs)}) ===")
+    print(f"{'arm':<16}{'mean recall':>13}{'CI95':>20}{'succ':>8}")
     for a in ARMS:
         print(f"{a:<16}{res['arm_mean_recall'][a]:>13}"
               f"{str(res['arm_mean_recall_ci95'][a]):>20}"
               f"{res['arm_succ_rate'][a]:>8}")
-    print("\n对比（配对置换检验）:")
+    print("\ncontrasts (paired permutation test):")
     for name, c in res["contrasts"].items():
         if "note" in c:
             print(f"  {name:<26} {c['note']}")
@@ -139,9 +142,9 @@ def main() -> int:
         sig = " *" if c["p_two_sided"] < 0.05 else ""
         print(f"  {name:<26} Δ={c['mean_diff']:>8} "
               f"CI={str(c['diff_ci95']):<18} p={c['p_two_sided']}{sig}")
-    print(f"\n干预臂极差 {spread}")
-    print(f"none 臂全成功(脆弱失败) {res['fragile_failure_cases']}/{len(recs)}")
-    print(f"诊断: {diag}")
+    print(f"\nintervention arm range {spread}")
+    print(f"none arm all-success (fragile failure) {res['fragile_failure_cases']}/{len(recs)}")
+    print(f"diagnosis: {diag}")
     print(f"\n→ {args.out}")
     return 0
 

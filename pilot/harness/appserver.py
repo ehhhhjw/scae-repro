@@ -1,21 +1,23 @@
 """Minimal JSON-RPC over stdio client for `codex app-server`.
 
-依据实读源码写成（codex-main @ 本地快照）：
-  - 启动方式：`codex app-server`（默认 --listen stdio://）
-  - 握手：request "initialize" {clientInfo, capabilities:{experimentalApi}} → notify "initialized"
-  - 方法名见 codex-rs/app-server-protocol/src/protocol/common.rs
-  - 参数字段为 camelCase（各 struct 上有 #[serde(rename_all = "camelCase")]）
-  - `thread/fork` 支持 path=<rollout jsonl 路径>（experimental，需 experimentalApi=true）
-  - `Thread.path` 为 [UNSTABLE] 字段，给出该 thread 的 rollout 文件路径
+Written against the source as actually read (codex-main @ local snapshot):
+  - Launch: `codex app-server` (defaults to --listen stdio://)
+  - Handshake: request "initialize" {clientInfo, capabilities:{experimentalApi}} → notify "initialized"
+  - Method names: see codex-rs/app-server-protocol/src/protocol/common.rs
+  - Param fields are camelCase (each struct carries #[serde(rename_all = "camelCase")])
+  - `thread/fork` supports path=<rollout jsonl path> (experimental, requires experimentalApi=true)
+  - `Thread.path` is an [UNSTABLE] field giving that thread's rollout file path
 
-设计要点
---------
-1. 读取必须在独立线程里做，并把三类消息分流，否则 notification 洪流会把 response 阻塞死：
-     - 有 id + result/error        → 我们发出的 request 的响应
-     - 有 id + method              → **服务端反向请求**（如审批），必须回复否则 turn 永久挂住
-     - 无 id + method              → 通知
-2. 审批：我们全程用 approvalPolicy="never" + sandbox="read-only"，理论上不会收到反向请求。
-   但仍必须实现兜底回复，并把"收到过反向请求"作为一个 smoke 失败信号上报。
+Design notes
+------------
+1. Reading must happen on a separate thread, demultiplexing three message classes, otherwise the
+   notification flood deadlocks responses:
+     - has id + result/error   → response to a request we sent
+     - has id + method         → **server-initiated request** (e.g. approval); must be answered, otherwise the turn hangs forever
+     - no id + method          → notification
+2. Approvals: we use approvalPolicy="never" + sandbox="read-only" throughout, so in theory no
+   server-initiated request should arrive. A fallback reply must still be implemented, and
+   "a server-initiated request was received" must be reported as a smoke failure signal.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 # ---------------------------------------------------------------------------
-# 环境钉死：与 config/env_pin.sh 保持一致
+# Environment pinning: kept consistent with config/env_pin.sh
 # ---------------------------------------------------------------------------
 PINNED_ENV: dict[str, str] = {
     "LC_ALL": "C",
@@ -65,15 +67,15 @@ def pinned_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 
 
 class AppServerError(RuntimeError):
-    """JSON-RPC error 或协议层失败。"""
+    """JSON-RPC error or protocol-level failure."""
 
 
 class TurnTimeout(RuntimeError):
-    """等待 turn/completed 超时。"""
+    """Timed out waiting for turn/completed."""
 
 
 class AppServer:
-    """一个 codex app-server 子进程的生命周期与 RPC 封装。"""
+    """Lifecycle and RPC wrapper for one codex app-server subprocess."""
 
     def __init__(
         self,
@@ -89,12 +91,12 @@ class AppServer:
         self.experimental_api = experimental_api
         self.approval_reply = approval_reply
 
-        # 分流后的三个通道
+        # The three channels after demultiplexing
         self._responses: dict[int, dict] = {}
         self._resp_cv = threading.Condition()
-        self.notifications: list[dict] = []          # 全量留档
+        self.notifications: list[dict] = []          # full archive
         self._notif_q: "queue.Queue[dict]" = queue.Queue()
-        self.server_requests: list[dict] = []        # 反向请求留档（应为空）
+        self.server_requests: list[dict] = []        # archive of server-initiated requests (should be empty)
 
         self._id = 0
         self._id_lock = threading.Lock()
@@ -124,13 +126,13 @@ class AppServer:
 
         self.server_info = self.initialize(timeout=startup_timeout)
 
-    # ------------------------------------------------------------------ 底层
+    # ------------------------------------------------------------------ low level
 
     def _drain_stderr(self) -> None:
         assert self.proc.stderr is not None
         for line in self.proc.stderr:
             self._stderr_tail.append(line.rstrip("\n"))
-            del self._stderr_tail[:-200]        # 只留最后 200 行
+            del self._stderr_tail[:-200]        # keep only the last 200 lines
             if self._log:
                 self._log.write(f"[stderr] {line}")
 
@@ -146,7 +148,7 @@ class AppServer:
             try:
                 msg = json.loads(line)
             except json.JSONDecodeError:
-                # app-server 不应该往 stdout 写非 JSON；留档以便排查
+                # app-server should not write non-JSON to stdout; archive it for diagnosis
                 self.notifications.append({"method": "__nonjson__", "params": {"raw": line}})
                 continue
 
@@ -166,10 +168,10 @@ class AppServer:
             self._resp_cv.notify_all()
 
     def _answer_server_request(self, msg: dict) -> None:
-        """兜底回复服务端反向请求。
+        """Fallback reply to a server-initiated request.
 
-        我们的配置（approvalPolicy=never + sandbox=read-only）下不应触发。
-        一旦触发说明配置没生效 —— smoke 必须把它当失败信号。
+        Should not fire under our configuration (approvalPolicy=never + sandbox=read-only).
+        If it does fire, the configuration did not take effect -- smoke must treat it as a failure signal.
         """
         method = msg.get("method", "")
         if "requestApproval" in method or "requestUserInput" in method:
@@ -215,7 +217,7 @@ class AppServer:
     def notify(self, method: str, params: dict | None = None) -> None:
         self._send({"jsonrpc": "2.0", "method": method, "params": params or {}})
 
-    # ------------------------------------------------------------------ 握手
+    # ------------------------------------------------------------------ handshake
 
     def initialize(self, timeout: float = 30.0) -> dict:
         params: dict[str, Any] = {
@@ -227,7 +229,7 @@ class AppServer:
         self.notify("initialized")
         return res
 
-    # -------------------------------------------------------------- 高层封装
+    # -------------------------------------------------------------- high-level wrappers
 
     def thread_start(
         self,
@@ -274,13 +276,13 @@ class AppServer:
         exclude_turns: bool = False,
         timeout: float = 120.0,
     ) -> dict:
-        """按 rollout 文件路径 fork —— 这是 SCAE 前缀重放的核心原语。
+        """Fork by rollout file path -- the core primitive of SCAE prefix replay.
 
-        注意：ThreadForkParams.thread_id 是必填的 String（非 Option），
-        因此按 path fork 时仍需传一个占位 thread_id；服务端在 path 非空时忽略它。
+        Note: ThreadForkParams.thread_id is a required String (not an Option), so forking by path
+        still needs a placeholder thread_id; the server ignores it when path is non-empty.
         """
         if thread_id is None and path is None:
-            raise ValueError("thread_id 与 path 至少给一个")
+            raise ValueError("at least one of thread_id and path must be given")
         params: dict[str, Any] = {
             "threadId": thread_id or "",
             "sandbox": sandbox,
@@ -310,12 +312,12 @@ class AppServer:
         timeout: float = 900.0,
         on_item: Callable[[dict], bool] | None = None,
     ) -> dict:
-        """跑一个 turn 并阻塞到 turn/completed。
+        """Run one turn and block until turn/completed.
 
-        on_item: 每收到一个 `item/completed` 通知就调用一次。
-                 返回 True 表示"请中断本 turn"（用于 V5 只跑一步的场景）。
+        on_item: called once for every `item/completed` notification received.
+                 Returning True means "interrupt this turn" (used by the V5 single-step scenario).
 
-        返回 {"items": [...], "notifications": [...], "interrupted": bool, "turnId": str|None}
+        Returns {"items": [...], "notifications": [...], "interrupted": bool, "turnId": str|None}
         """
         mark = len(self.notifications)
         params = {
@@ -323,8 +325,8 @@ class AppServer:
             "clientUserMessageId": str(uuid.uuid4()),
             "input": [{"type": "text", "text": text, "textElements": []}],
         }
-        # turn/start 可能立即返回 turnId，也可能阻塞到结束；两种都要能处理，
-        # 因此在后台线程里发请求，主线程只盯通知流。
+        # turn/start may return turnId immediately, or block until the end; both must be handled,
+        # so the request is sent on a background thread while the main thread only watches notifications.
         result_box: dict[str, Any] = {}
 
         def _fire() -> None:
@@ -355,7 +357,7 @@ class AppServer:
             method = msg.get("method", "")
             p = msg.get("params", {}) or {}
             if p.get("threadId") not in (None, thread_id):
-                continue          # 别的 thread 的通知
+                continue          # notification for a different thread
             if method == "turn/started":
                 turn_id = p.get("turnId") or p.get("turn", {}).get("id")
             elif method == "item/completed":
@@ -384,16 +386,16 @@ class AppServer:
         try:
             self.request("turn/interrupt", params, timeout=60)
         except AppServerError:
-            pass          # 已结束的 turn 打断会报错，忽略
+            pass          # interrupting an already-finished turn errors out; ignore
 
     def thread_read(self, thread_id: str, timeout: float = 60.0) -> dict:
         return self.request("thread/read", {"threadId": thread_id}, timeout=timeout)
 
     def compact_start(self, thread_id: str, timeout: float = 300.0) -> dict:
-        """主动触发压缩。用于把命题 4 从敏感性分析升级为随机化实验。"""
+        """Actively trigger compaction. Used to upgrade Proposition 4 from a sensitivity analysis to a randomized experiment."""
         return self.request("thread/compact/start", {"threadId": thread_id}, timeout=timeout)
 
-    # ------------------------------------------------------------------ 生命周期
+    # ------------------------------------------------------------------ lifecycle
 
     def close(self) -> None:
         try:
@@ -416,10 +418,10 @@ class AppServer:
 
 
 def thread_rollout_path(thread_obj: dict) -> str | None:
-    """从 thread/start | thread/fork 的响应里取出 rollout 文件路径。
+    """Extract the rollout file path from a thread/start | thread/fork response.
 
-    `Thread.path` 是 [UNSTABLE] 字段，需 experimentalApi=true 才会出现。
-    兜底：从 CODEX_HOME/sessions/YYYY/MM/DD/ 下按 thread id 扫描（见 smoke 的 V1）。
+    `Thread.path` is an [UNSTABLE] field and only appears with experimentalApi=true.
+    Fallback: scan under CODEX_HOME/sessions/YYYY/MM/DD/ by thread id (see smoke's V1).
     """
     thread = thread_obj.get("thread", thread_obj)
     return thread.get("path")

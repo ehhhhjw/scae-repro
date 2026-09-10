@@ -1,15 +1,15 @@
-"""全量实验分析 —— 一次性产出论文所需的全部表格数据。
+"""Full-scale experiment analysis -- produces all table data the paper needs in one pass.
 
-输入：全量定位结果（500 实例）+ 全量归因结果（多文件任务）
-输出：analysis.json + 控制台表格，对应论文 Experiment 章节的每张表。
+Input: full localization results (500 instances) + full attribution results (multi-file tasks)
+Output: analysis.json + console tables, one per table of the paper's Experiment section.
 
-包含：
-  T1 定位基线（三口径 × 按 gold 数分层 × 按 repo 分层）
-  T2 v_0 预测的 leave-one-repository-out 评估（AUROC/ECE/Brier/AURC）
-  T3 UQ 三分解（真实数据）
-  T4 归因对比 D1/D3（含 Wilcoxon，n 足够时给 p 值）
-  T5 熵结构统计（positivity 局部性）
-  T6 退化率与失效模式统计
+Contains:
+  T1 localization baseline (three definitions × stratified by gold count × stratified by repo)
+  T2 leave-one-repository-out evaluation of the v_0 predictor (AUROC/ECE/Brier/AURC)
+  T3 UQ three-way decomposition (real data)
+  T4 attribution contrasts D1/D3 (with Wilcoxon, p-value reported when n suffices)
+  T5 entropy structure statistics (positivity locality)
+  T6 degeneration rate and failure-mode statistics
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ def t1_baseline(recs: list[dict]) -> dict:
 
 # --------------------------------------------------------------------------- T2
 def t2_v0_loro(recs: list[dict]) -> dict:
-    """leave-one-repository-out 评估 v_0 = E[Y | q, G]。"""
+    """leave-one-repository-out evaluation of v_0 = E[Y | q, G]."""
     insts = {i.instance_id: i for i in T.load_instances()}
     rows = []
     for r in recs:
@@ -98,7 +98,7 @@ def t2_v0_loro(recs: list[dict]) -> dict:
                      "problem_statement": inst.problem_statement,
                      "repo_path": str(inst.repo)})
     if len(rows) < 20:
-        return {"note": f"样本不足({len(rows)})，不做 LORO"}
+        return {"note": f"insufficient samples({len(rows)}), skipping LORO"}
     X, y, groups, ids = F.build_matrix(rows)
     projects = sorted(set(groups))
     preds = np.zeros(len(y)); epis = np.zeros(len(y))
@@ -107,21 +107,21 @@ def t2_v0_loro(recs: list[dict]) -> dict:
         tr = ~te
         if tr.sum() < 10 or te.sum() == 0:
             continue
-        if len(set(y[tr].tolist())) < 2:      # 训练折全同类，退化为基率
+        if len(set(y[tr].tolist())) < 2:      # training fold single-class, degenerate to base rate
             preds[te] = y[tr].mean(); epis[te] = 0.0
             continue
         m = P.BayesianLogisticLaplace(l2=2.0).fit(X[tr], y[tr])
         preds[te] = m.predict_proba(X[te])
         epis[te] = m.epistemic_var(X[te])
     mask = preds > 0
-    # 有效性条件：LORO 需要足够多的 repo 组，否则训练/测试分布差异主导结果。
-    # 少于 5 个 repo 时 AUROC 不可解释（实测 2 repo 时得到 0.359 < 0.5）。
+    # Validity condition: LORO needs enough repo groups, else train/test distribution shift dominates.
+    # With fewer than 5 repos AUROC is uninterpretable (measured 0.359 < 0.5 at 2 repos).
     valid = len(projects) >= 5 and int(mask.sum()) >= 50
     return {
         "n": int(len(y)), "n_projects": len(projects),
         "loro_interpretable": valid,
-        "validity_note": ("可解释" if valid else
-                          f"不可解释：repo组={len(projects)}(需≥5), n={int(mask.sum())}(需≥50)"),
+        "validity_note": ("interpretable" if valid else
+                          f"uninterpretable: repo groups={len(projects)}(need ≥5), n={int(mask.sum())}(need ≥50)"),
         "base_rate": round(float(y.mean()), 4),
         "AUROC": round(P.auroc(preds[mask], y[mask]), 4) if mask.sum() > 5 else None,
         "ECE": round(P.ece(preds[mask], y[mask]), 4) if mask.sum() > 5 else None,
@@ -134,7 +134,7 @@ def t2_v0_loro(recs: list[dict]) -> dict:
 
 # --------------------------------------------------------------------------- T3
 def t3_uq_decomposition(recs: list[dict]) -> dict:
-    """真实数据的三分解。U_policy 需 K>1 才可估；K=1 时标注不可估。"""
+    """Three-way decomposition on real data. U_policy needs K>1 to be estimable; marked inestimable when K=1."""
     by_inst: dict[str, list[int]] = defaultdict(list)
     insts = {i.instance_id: i for i in T.load_instances()}
     for r in recs:
@@ -154,21 +154,21 @@ def t3_uq_decomposition(recs: list[dict]) -> dict:
         "n_instances": len(by_inst),
         "K_per_instance": dict(Counter(ks)),
         "U_policy": u_policy,
-        "U_policy_note": ("可估（存在 K>1 的实例）" if u_policy is not None
-                          else "不可估：所有实例 K=1，需重复 rollout"),
+        "U_policy_note": ("estimable (instances with K>1 exist)" if u_policy is not None
+                          else "inestimable: all instances have K=1, repeated rollouts needed"),
     }
 
 
 # --------------------------------------------------------------------------- T4
 def t4_attribution(attr_path: Path) -> dict:
     if not attr_path.exists():
-        return {"note": "尚无归因结果"}
+        return {"note": "no attribution results yet"}
     recs = [json.loads(l) for l in attr_path.read_text().splitlines() if l.strip()]
     usable = [r for r in recs
               if r.get("causal_top1_pos") is not None
               and r.get("judge_full_top1_pos") is not None]
     if not usable:
-        return {"n_runs": len(recs), "note": "无可用归因记录"}
+        return {"n_runs": len(recs), "note": "no usable attribution records"}
     disagree = [float(r["causal_top1_step"] != r["judge_full_top1_step"]) for r in usable]
     d1, d1lo, d1hi = bootstrap_ci(disagree)
     posdiff = [r["judge_full_top1_pos"] - r["causal_top1_pos"] for r in usable]
@@ -217,7 +217,7 @@ def t5_entropy(scan_dirs: list[Path]) -> dict:
                             "high": s["positivity_ok"]})
             per_task.append({"instance": d["instance"], "seq": seq})
     if not ntot:
-        return {"note": "无熵扫描数据"}
+        return {"note": "no entropy scan data"}
     return {
         "n_forkpoints": ntot,
         "high_entropy_fraction": round(nhigh / ntot, 4),
@@ -236,7 +236,7 @@ def main() -> int:
 
     lp = Path(args.locate)
     if not lp.exists():
-        # 回退：合并 shard
+        # fallback: merge shards
         shards = sorted(Path(lp).parent.glob("shard*/results.jsonl"))
         recs = []
         for s in shards:
@@ -255,19 +255,19 @@ def main() -> int:
                               encoding="utf-8")
 
     b = out["T1_baseline"]
-    print(f"\n=== T1 定位基线 (n={b['n_ok']}/{b['n_total']}, err={b['n_error']}) ===")
-    print(f"  recall口径 {b['primary_recall_rate']}  严格 {b['exact_match_rate']}  "
-          f"过滤后 {b['filtered_match_rate']}")
-    print(f"  步数 mean={b['mean_steps']} median={b['median_steps']}  "
-          f"墙钟 {b['mean_wall_s']}s  压缩run={b['n_with_compaction']}")
-    print("  按 gold 数:", {k: f"{v['rate']}({v['n']})" for k, v in b["by_n_gold"].items()})
-    print(f"  失败数 {b['n_failures']}")
+    print(f"\n=== T1 localization baseline (n={b['n_ok']}/{b['n_total']}, err={b['n_error']}) ===")
+    print(f"  recall definition {b['primary_recall_rate']}  strict {b['exact_match_rate']}  "
+          f"filtered {b['filtered_match_rate']}")
+    print(f"  steps mean={b['mean_steps']} median={b['median_steps']}  "
+          f"wall clock {b['mean_wall_s']}s  compacted runs={b['n_with_compaction']}")
+    print("  by gold count:", {k: f"{v['rate']}({v['n']})" for k, v in b["by_n_gold"].items()})
+    print(f"  failures {b['n_failures']}")
     print(f"\n=== T2 v0 LORO ===\n  {out['T2_v0_loro']}")
     print(f"\n=== T3 UQ ===\n  {out['T3_uq']}")
-    print(f"\n=== T4 归因 ===\n  {json.dumps(out['T4_attribution'], ensure_ascii=False)[:600]}")
+    print(f"\n=== T4 attribution ===\n  {json.dumps(out['T4_attribution'], ensure_ascii=False)[:600]}")
     t5 = out["T5_entropy"]
-    print(f"\n=== T5 熵结构 ===\n  fork点={t5.get('n_forkpoints')} "
-          f"高熵占比={t5.get('high_entropy_fraction')} "
+    print(f"\n=== T5 entropy structure ===\n  fork points={t5.get('n_forkpoints')} "
+          f"high-entropy fraction={t5.get('high_entropy_fraction')} "
           f"Spearman={t5.get('spearman_pos_vs_entropy')}")
     print(f"\n→ {args.out}")
     return 0

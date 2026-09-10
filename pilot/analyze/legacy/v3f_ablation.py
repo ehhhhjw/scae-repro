@@ -1,22 +1,24 @@
-"""V3f：三层结构先验的消融 —— 排除"全靠历史先验"这一替代解释。零 API。
+"""V3f: ablation of the three-layer structural prior -- rules out the "it is all historical prior" alternative explanation. Zero API.
 
-必须先做的理由
---------------
-V3b 得到正面结果（对象分布 top-3=0.513 超基线、ECE=0.0202），但候选打分含三层：
-    L1 一跳邻居 (W=0.62) / L2 同社区 (W=0.30) / L3 已访问历史 (W=0.08 + 自重复 0.04)
-若 only-L3（仅历史先验）就能达到同样的 top-3，则**代码图没有增量贡献**，
-V3b 的正面结论必须重新表述为"自重复先验有效"而非"代码结构有效"。
+Why this must come first
+------------------------
+V3b produced a positive result (object distribution top-3=0.513 above baseline, ECE=0.0202),
+but candidate scoring has three layers:
+    L1 one-hop neighbors (W=0.62) / L2 same community (W=0.30) / L3 visited history (W=0.08 + self-repeat 0.04)
+If only-L3 (historical prior alone) reaches the same top-3, then **the code graph contributes
+nothing incremental**, and V3b's positive conclusion must be restated as "the self-repeat prior
+works" rather than "code structure works".
 
-这是最需要排除的替代解释，优先级高于其他 V3 子实验。
+This is the alternative explanation most in need of ruling out, with higher priority than the other V3 sub-experiments.
 
-消融臂
-------
-  full     L1+L2+L3          基线
-  no_L1    去一跳邻居         依赖图边是否有用
-  no_L2    去同社区           Leiden 聚类是否有用
-  no_L3    去历史先验         自重复是否主导
-  only_L3  仅历史             **关键臂**：图结构是否有增量贡献
-  only_L1  仅一跳邻居         图边单独的能力
+Ablation arms
+-------------
+  full     L1+L2+L3          baseline
+  no_L1    drop one-hop neighbors    are dependency-graph edges useful
+  no_L2    drop same community       is Leiden clustering useful
+  no_L3    drop historical prior     does self-repeat dominate
+  only_L3  history only              **key arm**: does graph structure contribute anything incremental
+  only_L1  one-hop neighbors only    the standalone power of graph edges
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ ARMS = ("full", "no_L1", "no_L2", "no_L3", "only_L3", "only_L1")
 
 
 def candidates(g, cur_node, seen, arm: str, topk_seen: int = 30) -> dict[str, float]:
-    """按消融臂构造候选与权重。"""
+    """Build candidates and weights according to the ablation arm."""
     use_l1 = arm in ("full", "no_L2", "no_L3", "only_L1")
     use_l2 = arm in ("full", "no_L1", "no_L3")
     use_l3 = arm in ("full", "no_L1", "no_L2", "only_L3")
@@ -86,7 +88,7 @@ def main() -> int:
     by_repo: dict[str, list[dict]] = defaultdict(list)
     for e in eps:
         by_repo[e["project"]].append(e)
-    print(f"载入 {len(eps)} episode")
+    print(f"loaded {len(eps)} episodes")
 
     stat = {a: {"hits": {k: 0 for k in KS}, "tot": 0, "cov_num": 0, "cov_den": 0,
                 "ranks": [], "calib": [], "eff": [], "nll": 0.0} for a in ARMS}
@@ -131,7 +133,7 @@ def main() -> int:
     for a in ARMS:
         s = stat[a]
         if not s["tot"]:
-            res["arms"][a] = {"note": "无有效点"}
+            res["arms"][a] = {"note": "no valid points"}
             continue
         res["arms"][a] = {
             "n": s["tot"],
@@ -152,17 +154,17 @@ def main() -> int:
             "full_top3": full["topk"]["top3"],
             "only_L3_top3": only3["topk"]["top3"],
             "graph_increment": round(d3, 4),
-            "verdict": ("代码图有增量贡献：full 显著高于 only_L3"
+            "verdict": ("code graph contributes incrementally: full is significantly above only_L3"
                         if d3 > 0.03 else
-                        "⚠️ 代码图无增量贡献：正面结果实际来自历史先验，"
-                        "V3b 结论须重新表述"),
+                        "⚠️ code graph contributes nothing incremental: the positive result actually comes from the historical prior, "
+                        "the V3b conclusion must be restated"),
         }
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    print(f"\n=== V3f 三层先验消融 ===")
-    print(f"{'臂':<10}{'n':>6}{'覆盖':>8}{'top1':>8}{'top3':>8}{'top10':>8}"
-          f"{'MRR':>8}{'ECE':>8}{'有效候选':>9}")
+    print(f"\n=== V3f three-layer prior ablation ===")
+    print(f"{'arm':<10}{'n':>6}{'cov':>8}{'top1':>8}{'top3':>8}{'top10':>8}"
+          f"{'MRR':>8}{'ECE':>8}{'eff_cand':>9}")
     for a in ARMS:
         r = res["arms"][a]
         if "note" in r:
@@ -173,9 +175,9 @@ def main() -> int:
               f"{r['MRR']:>8}{r['ECE']:>8}{r['eff_candidates']:>9}")
     if "key_contrast" in res:
         kc = res["key_contrast"]
-        print(f"\n关键对比 full({kc['full_top3']}) - only_L3({kc['only_L3_top3']}) "
+        print(f"\nkey contrast full({kc['full_top3']}) - only_L3({kc['only_L3_top3']}) "
               f"= {kc['graph_increment']:+.4f}")
-        print(f"裁决: {kc['verdict']}")
+        print(f"verdict: {kc['verdict']}")
     print(f"\n→ {args.out}")
     return 0
 

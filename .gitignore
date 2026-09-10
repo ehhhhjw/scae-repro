@@ -1,13 +1,13 @@
-# ---- 私密 ----
+# ---- private ----
 env.sh
 *.key
 
-# ---- 录制产物（体量巨大，刻意不入库）----
-# 完整实验产物约 17GB：v4prime 5.3G / graphs 3.4G / full_attr 3.3G / m8 1.9G / full_locate 1.4G
+# ---- recorded artifacts (huge, deliberately untracked) ----
+# Full experiment artifacts ~17GB: v4prime 5.3G / graphs 3.4G / full_attr 3.3G / m8 1.9G / full_locate 1.4G
 pilot/runs/
 !pilot/runs/.gitkeep
 
-# ---- 数据集（仓库快照几十 GB）----
+# ---- dataset (repository snapshots, tens of GB) ----
 dataset/projects/
 dataset/instance_summary.csv
 dataset/*.json
@@ -22,7 +22,7 @@ venv/
 .pytest_cache/
 .ruff_cache/
 
-# ---- 系统 ----
+# ---- system ----
 .DS_Store
 *.log
 .e2eAjx/

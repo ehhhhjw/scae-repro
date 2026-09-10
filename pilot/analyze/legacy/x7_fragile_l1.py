@@ -1,40 +1,41 @@
-"""X7（零 API）：脆弱成功 ↔ L1 预测熵。补 RESEARCH_PLAN_v5 §G8。
+"""X7 (zero API): fragile success ↔ L1 predictive entropy. Supplements RESEARCH_PLAN_v5 §G8.
 
-命题
-----
-脆弱成功（0 < causal_v0 < 1，即重放不稳定）的 instance，其轨迹的
-平均预测熵 H_tool 与 H_prov 显著高于稳健成功（v0 = 1）的 instance。
+Proposition
+-----------
+Fragile-success instances (0 < causal_v0 < 1, i.e. replay is unstable) have
+significantly higher mean predictive entropy H_tool and H_prov over their traces
+than robust-success instances (v0 = 1).
 
-被估量
+Estimands
+---------
+1. Fragile vs robust success, paired contrast on mean H_tool (instance level)
+2. Fragile success vs total failure (v0 = 0), mean H_tool contrast
+3. H_tool mean trend across the three groups (fail / fragile / robust)
+4. Spearman correlation causal_v0 ~ mean H_tool (continuous version)
+5. Precision and recall of "high entropy → fragile/fail"
+
+Design
 ------
-1. 脆弱成功 vs 稳健成功的 mean H_tool 配对对比（instance 级）
-2. 脆弱成功 vs 完全失败（v0 = 0）的 mean H_tool 对比
-3. 三组（失败/脆弱/稳健）的 H_tool 均值趋势
-4. causal_v0 ~ mean H_tool 的 Spearman 相关（连续版本）
-5. 「高熵 → 脆弱/失败」的精度、召回
+- Fragile: 0 < causal_v0 < 1 (replay variance > 0)
+- Robust success: causal_v0 = 1.0 (every replay succeeds)
+- Failure: causal_v0 = 0.0 or close to it (replay usually fails)
+- Data source: the 70 multi-file instances in full_attr
 
-设计
-----
-- 脆弱：0 < causal_v0 < 1（重放方差 > 0）
-- 稳健成功：causal_v0 = 1.0（每次重放都成功）
-- 失败：causal_v0 = 0.0 或接近（重放通常失败）
-- 数据来源：full_attr 的 70 个多文件 instance
-
-RESEARCH_PLAN_v5 判据
---------------------
-| 结果 | 走向 |
+RESEARCH_PLAN_v5 criteria
+-------------------------
+| Result | Path forward |
 |---|---|
-| 脆弱 H_tool 显著高于稳健，且趋势单调 | 实用结论：H_tool 可作为"需要重放"的早期信号 |
-| 趋势存在但不显著 | 探索性：加入 X4 的 H_t ~ U^exec 联合分析 |
-| 无趋势 | 如实报告；说明 L1 量与执行不稳定性解耦 |
+| Fragile H_tool significantly above robust, trend monotonic | Practical: H_tool works as an early "needs replay" signal |
+| Trend present but not significant | Exploratory: fold into X4's joint H_t ~ U^exec analysis |
+| No trend | Report as is; note L1 quantities are decoupled from execution instability |
 
-统计纪律
---------
-- instance 级 bootstrap B=2000
-- 三组比较 BH-FDR q=0.10（3 个对比）
+Statistical discipline
+----------------------
+- instance-level bootstrap B=2000
+- three-group comparison BH-FDR q=0.10 (3 contrasts)
 - Spearman + bootstrap CI
-- 坑 #22：先验证 H_tool 在某个维度有可检出结构（位置/工具分层），
-  再下"与 v0 无关"的结论
+- Pitfall #22: first confirm H_tool has detectable structure along some dimension
+  (position / tool stratification) before concluding "unrelated to v0"
 """
 
 from __future__ import annotations
@@ -59,7 +60,7 @@ SEED = 20260814
 
 def boot_ci(vals: list[float], b: int = 2000, seed: int = SEED) -> dict:
     if not vals:
-        return {"note": "无样本"}
+        return {"note": "no samples"}
     rng = random.Random(seed)
     pts = []
     for _ in range(b):
@@ -73,7 +74,7 @@ def boot_ci(vals: list[float], b: int = 2000, seed: int = SEED) -> dict:
 
 def paired_ci(a: list[float], b_: list[float], bnum: int = 2000) -> dict:
     if len(a) != len(b_) or not a:
-        return {"note": f"点集不匹配 {len(a)} vs {len(b_)}"}
+        return {"note": f"point sets do not match {len(a)} vs {len(b_)}"}
     rng = random.Random(SEED)
     pts = []
     for _ in range(bnum):
@@ -114,7 +115,7 @@ def _pearson(a: list[float], b_: list[float]) -> float:
 
 def spearman_boot(xs: list[float], ys: list[float], b: int = 2000) -> dict:
     if len(xs) < 5:
-        return {"note": "样本不足"}
+        return {"note": "insufficient samples"}
     rho = _pearson(_rankdata(xs), _rankdata(ys))
     rng = random.Random(SEED)
     pts = []
@@ -148,7 +149,7 @@ def bh_fdr(pvals: list[float], q: float = 0.10) -> list[bool]:
 
 def normal_ci_diff(n1: int, m1: float, s1: float,
                    n2: int, m2: float, s2: float) -> dict:
-    """正态近似的两样本差值 CI（用于大样本情形下）。"""
+    """Normal-approximation CI for a two-sample difference (for large samples)."""
     se = (s1 ** 2 / n1 + s2 ** 2 / n2) ** 0.5
     diff = m1 - m2
     return {"diff": round(diff, 4),
@@ -164,28 +165,28 @@ def main() -> int:
     ap.add_argument("--out", default="pilot/runs/x7_fragile_l1.json")
     args = ap.parse_args()
 
-    # ---- 1. 载入工具通道 entropy_rows ----
+    # ---- 1. load tool-channel entropy_rows ----
     tm = json.loads(Path(args.tool_model).read_text())
     h_tool_idx: dict[tuple[str, int], float] = {
         (row["instance_id"], row["t"]): row["H_tool"]
         for row in tm.get("entropy_rows", [])
     }
-    print(f"工具通道 entropy_rows: {len(h_tool_idx)} 个步")
+    print(f"tool-channel entropy_rows: {len(h_tool_idx)} steps")
 
-    # ---- 2. 载入归因数据（causal_v0）----
+    # ---- 2. load attribution data (causal_v0) ----
     recs: list[dict] = []
     for f in sorted(Path(args.attr_dir).glob("shard*/attribution.jsonl")):
         for line in f.read_text().splitlines():
             if line.strip():
                 recs.append(json.loads(line))
-    print(f"归因记录: {len(recs)}")
+    print(f"attribution records: {len(recs)}")
     v0_map: dict[str, float] = {}
     for r in recs:
         v0 = r.get("causal_v0")
         if v0 is not None:
             v0_map[r["instance_id"]] = float(v0)
 
-    # ---- 3. 按 rollout 计算每个 instance 的 mean H_tool ----
+    # ---- 3. compute mean H_tool per instance from rollouts ----
     insts = {i.instance_id: i for i in T.load_instances()}
     runs_root = Path(args.runs_root)
     h_per_inst: dict[str, float] = {}
@@ -194,7 +195,7 @@ def main() -> int:
     for rfile in sorted(runs_root.glob("shard*/rollouts/*.jsonl")):
         iid = rfile.stem.split("__k")[0]
         if iid not in v0_map:
-            continue   # 只分析有 v0 的 instance（多文件子集）
+            continue   # only analyze instances that have v0 (multi-file subset)
         try:
             rl = R.load(rfile)
             steps = R.steps(rl)
@@ -209,9 +210,9 @@ def main() -> int:
         h_per_inst[iid] = statistics.mean(hs)
         n_steps_per_inst[iid] = len(hs)
 
-    print(f"有 H_tool 和 v0 的 instance: {len(h_per_inst)}")
+    print(f"instances with both H_tool and v0: {len(h_per_inst)}")
 
-    # ---- 4. 三组划分 ----
+    # ---- 4. three-group split ----
     EPS = 1e-6
     fail_ids = [i for i in h_per_inst if v0_map.get(i, 1) < EPS]
     fragile_ids = [i for i in h_per_inst if EPS < v0_map.get(i, 1) < 1 - EPS]
@@ -221,20 +222,20 @@ def main() -> int:
     fragile_h = [h_per_inst[i] for i in fragile_ids]
     robust_h = [h_per_inst[i] for i in robust_ids]
 
-    print(f"失败: {len(fail_ids)}  脆弱: {len(fragile_ids)}  稳健: {len(robust_ids)}")
+    print(f"fail: {len(fail_ids)}  fragile: {len(fragile_ids)}  robust: {len(robust_ids)}")
 
-    # 三组均值
+    # group means
     groups = {
         "fail": boot_ci(fail_h),
         "fragile": boot_ci(fragile_h),
         "robust": boot_ci(robust_h),
     }
 
-    # 配对对比（BH-FDR 校正 3 对比）
-    # 非配对 bootstrap 差值
+    # paired contrasts (BH-FDR correction over 3 contrasts)
+    # unpaired bootstrap difference
     def nonpaired_ci(a: list[float], b_: list[float], bnum: int = 2000) -> dict:
         if not a or not b_:
-            return {"note": "无样本"}
+            return {"note": "no samples"}
         rng = random.Random(SEED)
         pts = []
         for _ in range(bnum):
@@ -257,24 +258,24 @@ def main() -> int:
         "fragile_vs_fail": c_fragile_vs_fail,
     }
 
-    # ---- 5. 连续相关：mean H_tool ~ causal_v0 ----
+    # ---- 5. continuous correlation: mean H_tool ~ causal_v0 ----
     iids_sorted = sorted(h_per_inst.keys())
     xs = [h_per_inst[i] for i in iids_sorted]
     ys = [v0_map[i] for i in iids_sorted]
     corr_h_v0 = spearman_boot(xs, ys)
 
-    # ---- 6. 「高熵 threshold」的精度/召回（把"需要重放"= fragile+fail 当正类）----
+    # ---- 6. precision/recall of a "high entropy threshold" (positive class = "needs replay" = fragile+fail) ----
     med_h = statistics.median(list(h_per_inst.values()))
     pos_ids = set(fail_ids) | set(fragile_ids)
     neg_ids = set(robust_ids)
-    # 预测：H_tool > median → 需要重放
+    # prediction: H_tool > median → needs replay
     tp = sum(1 for i in pos_ids if h_per_inst[i] >= med_h)
     fp = sum(1 for i in neg_ids if h_per_inst[i] >= med_h)
     fn = sum(1 for i in pos_ids if h_per_inst[i] < med_h)
     prec = tp / (tp + fp) if tp + fp > 0 else 0.0
     rec = tp / (tp + fn) if tp + fn > 0 else 0.0
     f1 = 2 * prec * rec / (prec + rec) if prec + rec > 0 else 0.0
-    # AUROC（简单两类）
+    # AUROC (simple two-class)
     all_sorted = sorted(h_per_inst.keys(), key=lambda i: -h_per_inst[i])
     tpr_pts, fpr_pts = [0.0], [0.0]
     n_pos, n_neg = len(pos_ids), len(neg_ids)
@@ -296,11 +297,12 @@ def main() -> int:
         "recall": round(rec, 4),
         "f1": round(f1, 4),
         "auroc": round(auroc, 4),
-        "note": "正类=脆弱+失败（需要重放），负类=稳健成功",
+        "note": "positive class = fragile+fail (needs replay), negative class = robust success",
     }
 
-    # ---- 7. 功效检验：H_tool 本身是否有可检出结构（先于主张"无关"）----
-    # 已在 X1 证明 H_tool 有位置效应（早期低、中后高），这里再用 n_steps 检验
+    # ---- 7. power check: does H_tool itself have detectable structure (before claiming "no relation") ----
+    # X1 already showed H_tool has a position effect (low early, high mid/late);
+    # here we run one more check against n_steps
     ns = [n_steps_per_inst[i] for i in iids_sorted if i in n_steps_per_inst]
     corr_h_nsteps = spearman_boot(
         [h_per_inst[i] for i in iids_sorted if i in n_steps_per_inst], ns)
@@ -328,29 +330,29 @@ def main() -> int:
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    # ---- 输出摘要 ----
-    print(f"\n=== X7：脆弱成功 ↔ L1 预测熵 ===")
-    print(f"\n三组 H_tool 均值:")
+    # ---- print summary ----
+    print(f"\n=== X7: fragile success ↔ L1 predictive entropy ===")
+    print(f"\nmean H_tool by group:")
     for g, v in groups.items():
         if "note" not in v:
             print(f"  {g:10s}: {v['mean']:.4f} CI{v['ci95']}  (n={v['n']})")
-    print(f"\n配对对比（bootstrap 差值）:")
+    print(f"\ncontrasts (bootstrap difference):")
     for name, v in contrasts.items():
         if "note" not in v:
             print(f"  {name}: {v['diff']:+.4f} CI{v['ci95']}"
-                  f"  {'显著' if v['significant'] else '不显著'}")
+                  f"  {'significant' if v['significant'] else 'not significant'}")
     c = corr_h_v0
     if "note" not in c:
         print(f"\nSpearman H_tool ~ v0: rho={c['rho']:+.4f} CI{c['ci95']}"
-              f"  {'显著' if c['significant'] else '不显著'}")
+              f"  {'significant' if c['significant'] else 'not significant'}")
     pf = predict_fragile
-    print(f"\n「高 H_tool → 需要重放」预测性能:")
-    print(f"  阈值={pf['threshold_H_median']:.4f}  prec={pf['precision']:.3f}  "
+    print(f"\npredictive performance of \"high H_tool → needs replay\":")
+    print(f"  threshold={pf['threshold_H_median']:.4f}  prec={pf['precision']:.3f}  "
           f"rec={pf['recall']:.3f}  f1={pf['f1']:.3f}  AUROC={pf['auroc']:.3f}")
     pw = res["power_check_H_vs_nsteps"]
     if "note" not in pw:
-        print(f"\n功效检验：H_tool ~ n_steps  rho={pw['rho']:+.4f} CI{pw['ci95']}"
-              f"  {'显著' if pw['significant'] else '不显著'}")
+        print(f"\npower check: H_tool ~ n_steps  rho={pw['rho']:+.4f} CI{pw['ci95']}"
+              f"  {'significant' if pw['significant'] else 'not significant'}")
     print(f"\n→ {args.out}")
     return 0
 

@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# 阶段 3：judge 跨模型复制 —— 论文 Table 2
+# Stage 3: judge cross-model replication -- paper Table 2
 #
-# 核心操纵：模型与 rubric 完全不变，只改 judge 能看到的信息集
-#   full-trace  条件于  前缀 + 后继步骤 + 实现的结果 Y   → 条件于 A_t 的后代 ⇒ 碰撞偏差
-#   prefix-only 条件于  固定 60% 前缀，结果 Y 隐藏
-# 若 full-trace judge 在逼近一个前缀条件化的步局部量，这个操纵不应移动归责位置。
-# 论文实测位移 +0.537（sign test p = 1.1e-16），三个 judge 全为正。
+# The core manipulation: model and rubric stay exactly the same, only the information set the judge sees changes
+#   full-trace   conditions on  prefix + successor steps + realized outcome Y   → conditions on descendants of A_t ⇒ collider bias
+#   prefix-only  conditions on  fixed 60% prefix, outcome Y hidden
+# If the full-trace judge were approximating a prefix-conditional step-local quantity, this manipulation should not move where blame lands.
+# The paper measures a displacement of +0.537 (sign test p = 1.1e-16), positive for all three judges.
 #
-# 三个 judge（论文 Table 2 / Appendix C.2）：
-#   gpt-5.5-0424-global  原始（由阶段 2 的 run_attribution 顺带产出，不在本脚本内）
-#   qwen3.6-plus         通用模型
-#   qwen3-coder-plus     代码专用模型
-# 后两个走 /chat/completions 直连（pilot/analyze/judge_http.py），因为它们的
-# 流式实现与 codex 用的 /responses 端点不兼容。
+# The three judges (paper Table 2 / Appendix C.2):
+#   gpt-5.5-0424-global  original (produced as a side effect of run_attribution in stage 2, not in this script)
+#   qwen3.6-plus         general-purpose model
+#   qwen3-coder-plus     code-specialized model
+# The latter two go through /chat/completions directly (pilot/analyze/judge_http.py), because their
+# streaming implementation is incompatible with the /responses endpoint codex uses.
 #
-# ⚠️ 限流：默认 10 次调用 / 60 分钟窗口。25 episode × 2 条件 = 50 次调用 ≈ 5.5 小时/模型。
-#    论文实际用 48 次调用/模型，最终在 23 个共同 episode 上比较。
+# ⚠️ Rate limit: 10 calls per 60-minute window by default. 25 episodes × 2 conditions = 50 calls ≈ 5.5 hours per model.
+#    The paper actually used 48 calls per model and finally compared on the 23 shared episodes.
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
@@ -23,15 +23,15 @@ ATTR="$RUNS/full_attr"
 LOCATE="$RUNS/full_locate"
 LIMIT="${SCAE_JUDGE_LIMIT:-25}"
 
-log "阶段 3：judge 跨模型复制（论文 Table 2）"
+log "Stage 3: judge cross-model replication (paper Table 2)"
 banner
 require_api_key
-[ -d "$ATTR" ] || die "找不到 $ATTR，先跑 scripts/02_attribution.sh"
+[ -d "$ATTR" ] || die "cannot find $ATTR, run scripts/02_attribution.sh first"
 
 run_judge() {
   local model="$1" tag="$2"
   log "judge = $model"
-  # --analyze-only 可在已有 JSONL 上重算，不再花 API
+  # --analyze-only recomputes on existing JSONL without spending more API budget
   python3 -m pilot.analyze.x9_judge_crossmodel \
     --attr-dir "$ATTR" --runs-root "$LOCATE" \
     --model "$model" \
@@ -39,20 +39,20 @@ run_judge() {
     --limit "$LIMIT" --prefix-frac 0.6 \
     --max-calls "${SCAE_JUDGE_MAX_CALLS:-10}" \
     --window-min "${SCAE_JUDGE_WINDOW_MIN:-60}" \
-    || info "⚠️ $model 未跑完（多半是限流/超时）。可加 --analyze-only 就已有数据出结论。"
+    || info "⚠️ $model did not finish (most likely rate limiting / timeout). Add --analyze-only to draw conclusions from the data you already have."
 }
 
 run_judge "${SCAE_JUDGE_GENERAL:-qwen3.6-plus}"     "general"
 run_judge "${SCAE_JUDGE_CODER:-qwen3-coder-plus}"   "coder"
 
-# 汇总：位移的同质性检验（机制应跨 judge 一致）与富集的异质性检验（内容不应一致）
-log "跨模型汇总（论文 Table 2 的两个检验）"
+# Summary: homogeneity test of the displacement (the mechanism should be consistent across judges) and heterogeneity test of the enrichment (the content should not be)
+log "cross-model summary (the two tests of paper Table 2)"
 JSONLS=()
 for f in "$RUNS"/x9_general.jsonl "$RUNS"/x9_coder.jsonl "$RUNS"/x9_judge_crossmodel.jsonl; do
   [ -s "$f" ] && JSONLS+=("$f")
 done
-[ ${#JSONLS[@]} -gt 0 ] || die "没有任何 x9 JSONL 产物，无法汇总"
-info "参与汇总：${JSONLS[*]}"
+[ ${#JSONLS[@]} -gt 0 ] || die "no x9 JSONL artifacts at all, cannot summarize"
+info "included in summary: ${JSONLS[*]}"
 python3 -m pilot.analyze.x9b_crossmodel_pool \
   --jsonl "${JSONLS[@]}" \
   --attr-dir "$ATTR" --runs-root "$LOCATE" \
@@ -61,12 +61,12 @@ python3 -m pilot.analyze.x9b_crossmodel_pool \
 python3 - "$RUNS/x9b_crossmodel_pool.json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1]))
-print("\n  论文 Table 2 对照：")
-print("    位移应在每个 judge 上为正，且 judge 间无可检出异质性（p = 0.181）")
-print("    gold-provenance 富集只在 2/3 个 judge 上显著，异质性显著（p = 0.044）")
-print("    → 机制的批评可跨 scorer 迁移，内容的批评不行")
+print("\n  Paper Table 2 reference:")
+print("    the displacement should be positive for every judge, with no detectable heterogeneity across judges (p = 0.181)")
+print("    gold-provenance enrichment is significant for only 2/3 judges, and the heterogeneity is significant (p = 0.044)")
+print("    → criticism of the mechanism transfers across scorers, criticism of the content does not")
 print("\n  " + json.dumps(r, ensure_ascii=False)[:700])
 PY
 
-log "阶段 3 完成"
-info "下一步：bash scripts/04_analysis_offline.sh"
+log "Stage 3 complete"
+info "next: bash scripts/04_analysis_offline.sh"

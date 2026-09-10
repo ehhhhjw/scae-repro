@@ -1,21 +1,22 @@
-"""读/写/截断/改写 codex 的 rollout JSONL —— SCAE 前缀重放的底层。
+"""Read/write/truncate/rewrite codex rollout JSONL -- the substrate of SCAE prefix replay.
 
-文件格式（由 codex-rs/protocol/src/protocol.rs 确定）
----------------------------------------------------
-每行一个 `RolloutLine`：
+File format (fixed by codex-rs/protocol/src/protocol.rs)
+--------------------------------------------------------
+One `RolloutLine` per line:
     {"timestamp": "...", "ordinal": <u64?>, "type": <variant>, "payload": <...>}
-`type` 来自 `RolloutItem`（#[serde(tag="type", content="payload", rename_all="snake_case")]）：
+`type` comes from `RolloutItem` (#[serde(tag="type", content="payload", rename_all="snake_case")]):
     session_meta | response_item | inter_agent_communication
     | inter_agent_communication_metadata | compacted | turn_context | world_state | event_msg
 
-其中 `response_item` 的 payload 是 Responses API 的 item，我们关心：
-    动作：function_call / local_shell_call / custom_tool_call
-    观测：function_call_output / local_shell_call_output / custom_tool_call_output
+The payload of a `response_item` is a Responses API item; the parts we care about:
+    actions:      function_call / local_shell_call / custom_tool_call
+    observations: function_call_output / local_shell_call_output / custom_tool_call_output
 
-不变式（截断必须维持，否则模型侧会因悬空 tool call 报错）
---------------------------------------------------------
-任何 function_call 必须紧随其配对的 *_output。本模块的两个截断算子按构造保证这一点，
-并由 `assert_no_dangling_calls` 兜底检查。
+Invariant (truncation must preserve it, or the model side errors on a dangling tool call)
+-----------------------------------------------------------------------------------------
+Every function_call must be immediately followed by its paired *_output. The two truncation
+operators in this module guarantee that by construction, with `assert_no_dangling_calls` as a
+backstop check.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ def load(path: str | Path) -> list[dict]:
             try:
                 items.append(json.loads(line))
             except json.JSONDecodeError as exc:
-                raise ValueError(f"{path}:{lineno} 不是合法 JSON: {exc}") from exc
+                raise ValueError(f"{path}:{lineno} is not valid JSON: {exc}") from exc
     return items
 
 
@@ -72,19 +73,19 @@ def payload_type(item: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 步骤索引
+# Step index
 # ---------------------------------------------------------------------------
 
 @dataclass
 class Step:
-    """一个执行单元 u_t = <tool, object, ...>，即 AE-SCM 里的 A_t 与 O_t。"""
+    """One execution unit u_t = <tool, object, ...>, i.e. A_t and O_t in the AE-SCM."""
 
-    idx: int                      # 1-based 步序 t
-    call_line: int                # 动作在 items 中的下标
-    out_line: int | None          # 配对输出的下标（可能缺失：被中断的 turn）
-    tool: str                     # 工具名
-    args_raw: str                 # 原始参数字符串
-    args: dict = field(default_factory=dict)   # 解析后的参数（失败则空）
+    idx: int                      # 1-based step index t
+    call_line: int                # index of the action within items
+    out_line: int | None          # index of the paired output (may be missing: interrupted turn)
+    tool: str                     # tool name
+    args_raw: str                 # raw argument string
+    args: dict = field(default_factory=dict)   # parsed arguments (empty on failure)
     call_id: str | None = None
     output_text: str = ""
 
@@ -110,7 +111,7 @@ def _output_text(p: dict) -> str:
     if isinstance(out, str):
         return out
     if isinstance(out, dict):
-        # 某些变体是 {"content": "...", "success": bool}
+        # some variants are {"content": "...", "success": bool}
         for key in ("content", "text", "stdout"):
             if isinstance(out.get(key), str):
                 return out[key]
@@ -123,7 +124,7 @@ def _output_text(p: dict) -> str:
 
 
 def steps(items: list[dict]) -> list[Step]:
-    """抽取有序步骤列表。配对规则：优先 call_id，退化为"下一个 output"。"""
+    """Extract the ordered step list. Pairing rule: prefer call_id, fall back to "next output"."""
     out_by_call: dict[str, int] = {}
     for i, it in enumerate(items):
         if line_type(it) == "response_item" and payload_type(it) in OUTPUT_TYPES:
@@ -162,26 +163,26 @@ def steps(items: list[dict]) -> list[Step]:
 
 
 # ---------------------------------------------------------------------------
-# 截断与改写（干预算子）
+# Truncation and rewriting (intervention operators)
 # ---------------------------------------------------------------------------
 
 def truncate_before_step(items: list[dict], k: int) -> list[dict]:
-    """保留到第 k 步之前（不含第 k 步的动作与输出）。用于估计 v_{k-1}。"""
+    """Keep everything before step k (excluding step k's action and output). Estimates v_{k-1}."""
     st = steps(items)
     if not 1 <= k <= len(st):
-        raise IndexError(f"k={k} 越界，共 {len(st)} 步")
+        raise IndexError(f"k={k} out of range, {len(st)} steps total")
     cut = st[k - 1].call_line
     return _renumber(items[:cut])
 
 
 def truncate_including_step(items: list[dict], k: int) -> list[dict]:
-    """保留到第 k 步（含其动作与输出）。用于估计 v_k。"""
+    """Keep through step k (including its action and output). Estimates v_k."""
     st = steps(items)
     if not 1 <= k <= len(st):
-        raise IndexError(f"k={k} 越界，共 {len(st)} 步")
+        raise IndexError(f"k={k} out of range, {len(st)} steps total")
     s = st[k - 1]
     if s.out_line is None:
-        raise ValueError(f"第 {k} 步没有配对输出，截断会留下悬空 tool call")
+        raise ValueError(f"step {k} has no paired output; truncating would leave a dangling tool call")
     cut = max(s.call_line, s.out_line) + 1
     return _renumber(items[:cut])
 
@@ -193,16 +194,18 @@ def substitute_action(
     new_args: dict,
     new_output: str,
 ) -> list[dict]:
-    """把第 k 步替换为 (new_tool, new_args) 及其**真实执行结果** new_output。
+    """Replace step k with (new_tool, new_args) and its **actual execution result** new_output.
 
-    ⚠️ new_output 必须由我们真正执行 new_args 得到。填入编造的输出就不是忠实的 do()，
-    而是在干预观测——两者的因果语义完全不同。
+    ⚠️ new_output must come from really executing new_args. Filling in a fabricated output is not
+    a faithful do(); it is an intervention on the observation -- the causal semantics of the two
+    are entirely different.
 
-    返回：前缀（含被替换的第 k 步），后续步骤一律丢弃（由 agent 自行续写）。
+    Returns: the prefix (including the replaced step k); all later steps are dropped (the agent
+    continues on its own).
     """
     st = steps(items)
     if not 1 <= k <= len(st):
-        raise IndexError(f"k={k} 越界，共 {len(st)} 步")
+        raise IndexError(f"k={k} out of range, {len(st)} steps total")
     s = st[k - 1]
     prefix = items[: s.call_line]
     call_id = s.call_id or f"scae_{k}"
@@ -228,40 +231,44 @@ def mask_output_lines(
     targets: Iterable[str],
     mode: str = "drop",
 ) -> tuple[list[dict], dict]:
-    """**do(observation)**：把第 k 步输出里提到 `targets` 的行掩蔽掉，动作与参数不变。
+    """**do(observation)**: mask the lines mentioning `targets` in step k's output, action unchanged.
 
-    与 `substitute_action` 的因果语义差别（务必分清）
-    ------------------------------------------------
-    `substitute_action` 是 do(action)：换动作、并填入**真实执行**的结果。
-    本算子是 do(observation)：动作、参数、环境全不动，只改 agent **看到的内容**。
-    它在 AE-SCM 下是良定义的（观测是节点），对应 Theorem 1 的**信息项**，
-    测的是**这一条信息路径**的贡献 —— 即 path-specific effect。
+    Causal-semantics difference from `substitute_action` (do not conflate them)
+    ---------------------------------------------------------------------------
+    `substitute_action` is do(action): swap the action and fill in the **actually executed** result.
+    This operator is do(observation): action, arguments and environment all stay put, only **what
+    the agent sees** changes.
+    It is well-defined under the AE-SCM (observations are nodes) and corresponds to the
+    **information term** of Theorem 1; it measures the contribution of **this one information
+    path** -- i.e. a path-specific effect.
 
-    它**故意**不阻断"文件可由别的途径被发现"：若 agent 后续用 ls/grep 又找到该文件，
-    那正是我们要测的冗余。因此本算子的效应是"移除单条溯源边"的效应，
-    不是"使文件不可达"的效应。
+    It **deliberately** does not block "the file can be discovered by other means": if the agent
+    later finds the file again via ls/grep, that is exactly the redundancy we want to measure. So
+    the effect of this operator is that of "removing a single provenance edge", not that of
+    "making the file unreachable".
 
-    ⚠️ 内部效度：掩蔽会改变输出长度与内容分布。因此实验必须带**安慰剂臂**
-    （掩蔽等量的非目标行），否则无法区分"信息被移除"与"输出被扰动"。
+    ⚠️ Internal validity: masking changes output length and content distribution. The experiment
+    therefore must carry a **placebo arm** (masking the same number of non-target lines), or
+    "information removed" cannot be told apart from "output perturbed".
 
-    参数
-    ----
-    mode="drop"     直接删掉命中的行（等价于"grep 没匹配到这里"）
-    mode="placebo"  语义同 drop，但由调用方传入非目标路径，用作对照
-    返回
-    ----
-    (改写后的 items 前缀, 诊断信息)。前缀保留到第 k 步的输出为止，
-    后续步骤丢弃（由 agent 自行续写），与 `truncate_including_step` 一致。
+    Parameters
+    ----------
+    mode="drop"     delete the matched lines outright (equivalent to "grep matched nothing here")
+    mode="placebo"  same semantics as drop, but the caller passes non-target paths, as a control
+    Returns
+    -------
+    (rewritten items prefix, diagnostics). The prefix is kept up to step k's output; later steps
+    are dropped (the agent continues on its own), same as `truncate_including_step`.
     """
     st = steps(items)
     if not 1 <= k <= len(st):
-        raise IndexError(f"k={k} 越界，共 {len(st)} 步")
+        raise IndexError(f"k={k} out of range, {len(st)} steps total")
     s = st[k - 1]
     if s.out_line is None:
-        raise ValueError(f"第 {k} 步没有配对输出，无法掩蔽")
+        raise ValueError(f"step {k} has no paired output, cannot mask")
     tgts = [t for t in targets if t]
     if not tgts:
-        raise ValueError("targets 为空")
+        raise ValueError("targets is empty")
 
     p_out = payload(items[s.out_line])
     orig = _output_text(p_out)
@@ -273,7 +280,7 @@ def mask_output_lines(
         else:
             kept.append(ln)
     if not dropped:
-        raise ValueError(f"第 {k} 步输出里没有命中 {tgts[:2]}… 的行，掩蔽无操作")
+        raise ValueError(f"step {k} output has no line matching {tgts[:2]}..., masking is a no-op")
 
     new_items = [dict(it) for it in items[: s.out_line + 1]]
     np_ = dict(payload(new_items[s.out_line]))
@@ -293,7 +300,7 @@ def mask_output_lines(
 
 def count_output_lines_matching(items: list[dict], k: int,
                                targets: Iterable[str]) -> int:
-    """第 k 步输出里命中 targets 的行数 —— 供安慰剂臂配平掩蔽行数。"""
+    """Lines in step k's output matching targets -- lets the placebo arm balance masked lines."""
     st = steps(items)
     if not 1 <= k <= len(st) or st[k - 1].out_line is None:
         return 0
@@ -303,7 +310,7 @@ def count_output_lines_matching(items: list[dict], k: int,
 
 
 def _renumber(items: list[dict]) -> list[dict]:
-    """重排 ordinal。保守起见保留原 timestamp（它不参与模型可见历史）。"""
+    """Renumber ordinal. Conservatively keep the original timestamp (not part of visible history)."""
     out = []
     n = 0
     for it in items:
@@ -316,7 +323,7 @@ def _renumber(items: list[dict]) -> list[dict]:
 
 
 def assert_no_dangling_calls(items: list[dict]) -> None:
-    """截断后的不变式检查：每个动作都必须有配对输出。"""
+    """Post-truncation invariant check: every action must have a paired output."""
     pending: list[str] = []
     for it in items:
         if line_type(it) != "response_item":
@@ -331,37 +338,38 @@ def assert_no_dangling_calls(items: list[dict]) -> None:
             elif pending:
                 pending.pop(0)
     if pending:
-        raise ValueError(f"截断结果含 {len(pending)} 个悬空 tool call: {pending}")
+        raise ValueError(f"truncated result contains {len(pending)} dangling tool call(s): {pending}")
 
 
 # ---------------------------------------------------------------------------
-# 压缩检测（命题 4）
+# Compaction detection (Proposition 4)
 # ---------------------------------------------------------------------------
 
 def compaction_lines(items: list[dict]) -> list[int]:
-    """返回所有压缩事件所在行下标。非空即意味着假设 A1 在该轨迹上失效。"""
+    """Line indices of all compaction events. Non-empty means assumption A1 fails on this trace."""
     return [i for i, it in enumerate(items) if line_type(it) == "compacted"]
 
 
 # ---------------------------------------------------------------------------
-# 动作分桶：把连续的工具调用映射到离散的 categorical 支撑集
+# Action bucketing: map continuous tool calls onto a discrete categorical support
 # ---------------------------------------------------------------------------
 
 _PATHISH = re.compile(r"[\w./\-]*/[\w./\-]+|\b[\w\-]+\.(?:py|md|txt|cfg|toml|json|ya?ml)\b")
 
 
 def action_bucket(step: Step, repo_root: str | Path | None = None) -> tuple[str, str]:
-    """(tool, target) —— AE-SCM 中 A_t 的等价类。
+    """(tool, target) -- the equivalence class of A_t in the AE-SCM.
 
-    这是 §3.7「用代码图恢复有效 overlap」的最小可用版本：把自由文本参数
-    收敛到 (工具, 目标节点) 二元组，使动作空间可枚举、可统计频率、可算熵。
+    This is the minimal usable version of §3.7 "recovering effective overlap with the code
+    graph": collapse free-text arguments into a (tool, target node) pair, so the action space
+    becomes enumerable, frequency-countable and entropy-computable.
     """
     a = step.args
     for key in ("path", "file", "file_path", "target", "dir", "pattern", "query"):
         if isinstance(a.get(key), str) and a[key].strip():
             return (step.tool, _norm_target(a[key], repo_root))
 
-    # shell 类：取命令名 + 第一个像路径的参数
+    # shell-like: take the command name + the first path-looking argument
     cmd = a.get("command")
     if isinstance(cmd, list):
         cmd = " ".join(str(c) for c in cmd)
@@ -385,6 +393,6 @@ def _norm_target(raw: str, repo_root: str | Path | None) -> str:
 
 
 def trace_fingerprint(items: list[dict], repo_root: str | Path | None = None) -> str:
-    """轨迹指纹，用于去重与判断两次 rollout 是否走了同一条路径。"""
+    """Trace fingerprint, for dedup and for telling whether two rollouts took the same path."""
     seq = "|".join(f"{t}#{o}" for t, o in (action_bucket(s, repo_root) for s in steps(items)))
     return hashlib.sha256(seq.encode()).hexdigest()[:16]

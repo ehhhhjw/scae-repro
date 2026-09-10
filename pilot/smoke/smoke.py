@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
-"""S0 Smoke：在投入任何正式实验之前，验掉五个决定方法可行性的未知量。
+"""S0 Smoke: before investing in any formal experiment, settle five unknowns that decide whether the method is feasible.
 
-    [V1] experimental 门控是否可开？thread.path 是否可得？按 path fork 是否可用？
-    [V2] 工具面能否收窄？（实测 agent 究竟用了哪些工具、违规率多少）
-    [V3] fork 一个"自造/截断的 rollout"最少需要保留哪些 item 类型？
-    [V4] fork 之后用 CONTINUE_PROMPT 推进，是"接着做"还是"重启任务"？
-    [V5] 同一前缀重复 fork，动作分布的熵是否 > 0？   ← 风险最高的一条
+    [V1] Can the experimental gate be opened? Is thread.path obtainable? Does fork by path work?
+    [V2] Can the tool surface be narrowed? (measure which tools the agent actually used, and the violation rate)
+    [V3] What is the minimal set of item types that must be kept to fork a "hand-built/truncated rollout"?
+    [V4] After a fork, does advancing with CONTINUE_PROMPT "carry on" or "restart the task"?
+    [V5] Forking the same prefix repeatedly, is the entropy of the action distribution > 0?   ← the highest-risk one
 
-[V5] 若熵 ≈ 0，则 positivity 完全失效、定理 1 的策略基线项恒为 0，
-整套估计策略必须改用软干预（turn/steer 或 instruction 扰动）作为替代动作来源。
-所以 V5 必须最先知道结果。
+[V5] If the entropy ≈ 0, positivity fails outright, the policy baseline term of Theorem 1 is identically 0,
+and the whole estimation strategy must switch to soft interventions (turn/steer or instruction perturbation)
+as the alternative action source. So V5 must be answered first.
 
-用法
-----
+Usage
+-----
     python pilot/smoke/smoke.py --instance astropy__astropy-12907 \\
         --model <model> --out pilot/runs/smoke --v5-samples 8
 
-输出
-----
-    <out>/<instance>/report.json        结构化结论（含每项 PASS/FAIL）
-    <out>/<instance>/base.rollout.jsonl 原始 rollout 副本
-    <out>/<instance>/forks/*.jsonl      各 ablation 用的截断文件
-    <out>/<instance>/appserver.log      完整 JSON-RPC 收发日志
+Output
+------
+    <out>/<instance>/report.json        structured conclusions (PASS/FAIL per item)
+    <out>/<instance>/base.rollout.jsonl copy of the raw rollout
+    <out>/<instance>/forks/*.jsonl      truncated files used by each ablation
+    <out>/<instance>/appserver.log      full JSON-RPC send/receive log
 """
 
 from __future__ import annotations
@@ -41,9 +41,9 @@ from pilot.harness import rollout as R                      # noqa: E402
 from pilot.harness.appserver import AppServer, AppServerError, thread_rollout_path  # noqa: E402
 from pilot.probes import task as T                          # noqa: E402
 
-# 允许的工具名（V2 的判据）。命中之外的即记为违规。
+# Allowed tool names (V2's criterion). Anything not matching is recorded as a violation.
 ALLOWED_TOOL_HINTS = ("read", "search", "grep", "glob", "list", "find", "view", "answer")
-# 明确视为违规的（会改变仓库状态或超出只读定位范围）
+# Explicitly counted as violations (they mutate repository state or go beyond read-only localization)
 FORBIDDEN_TOOL_HINTS = ("apply_patch", "write", "edit", "update_plan_apply", "patch")
 
 
@@ -60,7 +60,7 @@ def normalized_entropy(counts: Counter) -> float:
 
 
 # ---------------------------------------------------------------------------
-# V3 的 ablation 方案：逐步丢弃 item 类型，找出 fork 所需的最小集合
+# V3's ablation plan: drop item types progressively to find the minimal set fork needs
 # ---------------------------------------------------------------------------
 ABLATIONS: list[tuple[str, set[str] | None]] = [
     ("keep_all", None),
@@ -83,20 +83,20 @@ def apply_ablation(items: list[dict], drop: set[str] | None) -> list[dict]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--instance", required=True)
-    ap.add_argument("--model", default=None, help="留空则用 codex 默认模型")
-    ap.add_argument("--model-provider", default=None, help="如 idealab")
+    ap.add_argument("--model", default=None, help="leave empty to use the codex default model")
+    ap.add_argument("--model-provider", default=None, help="e.g. idealab")
     ap.add_argument("--codex-bin", default="codex")
     ap.add_argument("--out", default="pilot/runs/smoke")
     ap.add_argument("--v5-samples", type=int, default=8)
     ap.add_argument("--fork-step", type=int, default=None,
-                    help="在第几步之前截断；默认取 trace 中点")
+                    help="truncate before which step; defaults to the trace midpoint")
     ap.add_argument("--turn-timeout", type=float, default=1200.0)
     ap.add_argument("--skip-v5", action="store_true")
     args = ap.parse_args()
 
     insts = {i.instance_id: i for i in T.load_instances()}
     if args.instance not in insts:
-        print(f"未知 instance: {args.instance}", file=sys.stderr)
+        print(f"unknown instance: {args.instance}", file=sys.stderr)
         return 2
     inst = insts[args.instance]
 
@@ -113,16 +113,16 @@ def main() -> int:
         "checks": {},
     }
 
-    # ---------------------------------------------------------------- 前置检查
-    # 数据集工作区叠了 gold patch，跑前必须 reset 回干净 base_commit（buggy 态）
+    # ---------------------------------------------------------------- preflight checks
+    # The dataset worktree has the gold patch applied; before running we must reset back to a clean base_commit (buggy state)
     repo_state = T.reset_repo(inst)
     report["repo"] = repo_state
     if not repo_state["ok"]:
         report["checks"]["PRE_repo_clean"] = {"pass": False, "detail": repo_state["reason"]}
         _save(report, outdir)
-        print(f"FAIL 前置检查（reset 后仍不干净）: {repo_state['reason']}", file=sys.stderr)
+        print(f"FAIL preflight check (still not clean after reset): {repo_state['reason']}", file=sys.stderr)
         return 1
-    report["checks"]["PRE_repo_clean"] = {"pass": True, "detail": "reset 到 base_commit 成功"}
+    report["checks"]["PRE_repo_clean"] = {"pass": True, "detail": "reset to base_commit succeeded"}
     report["repo_n_py"] = T.n_py_files(inst)
 
     t0 = time.time()
@@ -134,7 +134,7 @@ def main() -> int:
     ) as srv:
         report["server_info"] = srv.server_info
 
-        # ------------------------------------------------------ V1a: 启动 + path
+        # ------------------------------------------------------ V1a: start + path
         started = srv.thread_start(
             cwd=inst.repo,
             model=args.model, model_provider=args.model_provider,
@@ -149,13 +149,13 @@ def main() -> int:
             base_path = _scan_rollout(codex_home, base_tid)
         report["checks"]["V1a_thread_path_available"] = {
             "pass": base_path is not None,
-            "detail": base_path or "Thread.path 缺失且 sessions/ 扫描未命中",
+            "detail": base_path or "Thread.path missing and the sessions/ scan found nothing",
         }
         if base_path is None:
             _save(report, outdir)
             return 1
 
-        # ------------------------------------------------- 跑完整任务（V2 数据源）
+        # ------------------------------------------------- run the full task (V2 data source)
         run = srv.turn_run(base_tid, T.build_prompt(inst), timeout=args.turn_timeout)
         report["base_run"] = {
             "n_items": len(run["items"]),
@@ -192,7 +192,7 @@ def main() -> int:
                 f"{a}#{b}" for a, b in (R.action_bucket(s, inst.repo) for s in st)
             )),
         }
-        # 反向请求应为空：非空说明 approvalPolicy/sandbox 没生效
+        # Server-initiated requests should be empty: non-empty means approvalPolicy/sandbox did not take effect
         report["checks"]["V2b_no_server_requests"] = {
             "pass": not srv.server_requests,
             "n": len(srv.server_requests),
@@ -201,7 +201,7 @@ def main() -> int:
 
         if len(st) < 3:
             report["checks"]["V3_min_item_set"] = {
-                "pass": False, "detail": f"步数太少({len(st)})，无法做前缀截断"}
+                "pass": False, "detail": f"too few steps ({len(st)}), cannot truncate a prefix"}
             _save(report, outdir)
             return 1
 
@@ -232,7 +232,7 @@ def main() -> int:
                                         "error": str(exc)[:400]}
         v3["pass"] = good_variant is not None
         v3["first_working_variant"] = good_variant
-        # 最小集合 = 通过的最激进 ablation
+        # minimal set = the most aggressive ablation that passes
         v3["minimal_working_variant"] = next(
             (n for n, _ in reversed(ABLATIONS) if v3["variants"].get(n, {}).get("pass")), None
         )
@@ -252,8 +252,8 @@ def main() -> int:
         p4 = thread_rollout_path(f4) or _scan_rollout(codex_home, tid4)
         cont_items = R.load(p4) if p4 else []
         cont_steps = R.steps(cont_items)
-        # 判据：续跑后的总步数 > 前缀步数（真的往前走了），
-        # 且前 k-1 步的动作桶与原轨迹一致（没有重启任务）
+        # Criterion: total steps after continuation > prefix steps (it really moved forward),
+        # and the action buckets of the first k-1 steps match the original trace (no task restart)
         orig_buckets = [R.action_bucket(s, inst.repo) for s in st[: k - 1]]
         cont_buckets = [R.action_bucket(s, inst.repo) for s in cont_steps[: k - 1]]
         ans4 = T.parse_answer(T.final_message_text(run4["items"]))
@@ -283,7 +283,7 @@ def main() -> int:
                     seen: list[dict] = []
 
                     def _stop(p: dict, _seen: list[dict] = seen) -> bool:
-                        """收到第一个工具调用就中断——只需采样 A_k，不必跑到底。"""
+                        """Interrupt on the first tool call -- we only need to sample A_k, not run to the end."""
                         it = p.get("item", p)
                         kind = str(it.get("itemType") or it.get("type") or "")
                         if "ommand" in kind or "oolCall" in kind or "tool_call" in kind:
@@ -299,14 +299,14 @@ def main() -> int:
                         a, b = R.action_bucket(sample_steps[k - 1], inst.repo)
                         first_actions.append(f"{a}#{b}")
                     else:
-                        errors.append(f"sample{i}: 续跑未产生第 {k} 步")
+                        errors.append(f"sample{i}: continuation produced no step {k}")
                 except Exception as exc:  # noqa: BLE001
                     errors.append(f"sample{i}: {type(exc).__name__}: {str(exc)[:200]}")
 
             counts = Counter(first_actions)
             H = entropy(counts)
             report["checks"]["V5_action_entropy"] = {
-                # 判据：至少出现 2 个不同动作。熵为 0 → positivity 失效 → 方法需改
+                # Criterion: at least 2 distinct actions. Zero entropy → positivity fails → the method must change
                 "pass": len(counts) >= 2,
                 "n_samples": len(first_actions),
                 "n_distinct": len(counts),
@@ -314,8 +314,9 @@ def main() -> int:
                 "normalized_entropy": round(normalized_entropy(counts), 4),
                 "distribution": dict(counts),
                 "errors": errors,
-                "note": ("熵为 0 意味着策略在该前缀上近乎确定：positivity 完全失效，"
-                         "Δ_t 的策略基线项恒为 0，必须改用软干预作为替代动作来源"),
+                "note": ("zero entropy means the policy is near-deterministic on this prefix: positivity fails "
+                         "outright, the policy baseline term of Δ_t is identically 0, and soft interventions "
+                         "must be used as the alternative action source"),
             }
 
     report["wall_s_total"] = round(time.time() - t0, 1)
@@ -336,16 +337,16 @@ def _verdict(report: dict) -> dict:
         "failed_hard_checks": failed_hard,
         "v5_entropy_ok": v5,
         "next": (
-            "阻塞：先修 " + ", ".join(failed_hard) if failed_hard
-            else "V5 熵为 0 → 改用软干预路线，估计量需重写为『相对于扰动策略的效应』"
+            "blocked: first fix " + ", ".join(failed_hard) if failed_hard
+            else 'V5 entropy is 0 → switch to the soft-intervention route; the estimand must be rewritten as "the effect relative to a perturbed policy"'
             if v5 is False
-            else "全部通过 → 进入 S1（75 任务 × K=4）"
+            else "all passed → proceed to S1 (75 tasks × K=4)"
         ),
     }
 
 
 def _scan_rollout(codex_home: Path, thread_id: str | None) -> str | None:
-    """Thread.path 不可得时的兜底：在 CODEX_HOME/sessions 下按 thread id 找。"""
+    """Fallback when Thread.path is unavailable: search under CODEX_HOME/sessions by thread id."""
     if not thread_id:
         return None
     root = Path(codex_home) / "sessions"
@@ -370,14 +371,14 @@ def _print(report: dict) -> None:
         print(f"  [{flag}] {name}")
     v5 = report["checks"].get("V5_action_entropy", {})
     if v5.get("n_samples"):
-        print(f"\n  V5 动作分布 (n={v5['n_samples']}, distinct={v5['n_distinct']}, "
+        print(f"\n  V5 action distribution (n={v5['n_samples']}, distinct={v5['n_distinct']}, "
               f"H={v5['entropy_nats']} nats):")
         for a, c in sorted(v5["distribution"].items(), key=lambda kv: -kv[1]):
             print(f"      {c:>3}x  {a}")
     v3 = report["checks"].get("V3_min_item_set", {})
     if v3.get("minimal_working_variant"):
-        print(f"\n  V3 最小可 fork 的 item 集合: {v3['minimal_working_variant']}")
-    print(f"\n  裁决: {report['verdict']['next']}\n")
+        print(f"\n  V3 minimal forkable item set: {v3['minimal_working_variant']}")
+    print(f"\n  verdict: {report['verdict']['next']}\n")
 
 
 if __name__ == "__main__":

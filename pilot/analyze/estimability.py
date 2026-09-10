@@ -1,24 +1,27 @@
-"""R1+R2：三态记账 + manipulation check。零 API，只解析已有 rollout。
+"""R1+R2: three-state accounting + manipulation check. Zero API, only parses existing rollouts.
 
-痛点
-----
-现状用单个布尔 `degenerate`（Δ 全 0）把两种语义完全不同的情况混同：
-  (a) 干预**无法施加/无法估计** → 应出分母
-  (b) 干预**成功施加但无因果效应** → 应入分母且记零效应
-导致 `NNondegen=54/70` 无法解释。
+Pain point
+----------
+The status quo uses a single boolean `degenerate` (Δ all 0), conflating two semantically distinct cases:
+  (a) the intervention **cannot be applied / cannot be estimated** → should leave the denominator
+  (b) the intervention **is applied successfully but has no causal effect** → should enter the
+      denominator and be recorded as zero effect
+which makes `NNondegen=54/70` uninterpretable.
 
-RFEval 的 contrast precondition delta + contrast coverage 指出正确记账方式：
-delta=0 出分母并并列上报 coverage；kappa=0 入分母记为失败。本模块实现其等价物。
+RFEval's contrast precondition delta + contrast coverage points at the correct accounting:
+delta=0 leaves the denominator and coverage is reported alongside; kappa=0 enters the denominator
+as a failure. This module implements the equivalent.
 
-E1 首条实证支持这个区分：django-12155 四臂各 m=4 次全部 recall=0.5、方差为零，
-而注入的观测经核验确为真实文件内容（4884 字符）。即 delta!=0 但 kappa=0 ——
-失败不是"没看到正确文件"，而是停止/报告策略决定了不报。
+The first E1 case empirically supports this distinction: django-12155 gives recall=0.5 with zero
+variance across all m=4 runs of each of the four arms, while the injected observation was verified
+to be real file content (4884 characters). That is, delta!=0 but kappa=0 -- the failure is not
+"never saw the right file" but the stop/report policy deciding not to report it.
 
-三态
-----
-  INESTIMABLE  无法施加有效干预 / MC1 未通过 → 出分母，计入 coverage
-  NO_EFFECT    干预可施加且 MC1 通过，但 Δ_t = 0 → 入分母，零效应
-  EFFECT       干预可施加且 Δ_t != 0 → 入分母
+Three states
+------------
+  INESTIMABLE  no valid intervention can be applied / MC1 not passed → leaves the denominator, counted in coverage
+  NO_EFFECT    intervention applicable and MC1 passed, but Δ_t = 0 → enters the denominator, zero effect
+  EFFECT       intervention applicable and Δ_t != 0 → enters the denominator
 """
 
 from __future__ import annotations
@@ -41,7 +44,7 @@ _IDENTS = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{5,})\b")
 
 
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float, float]:
-    """Wilson score 区间 —— 小样本比例的正确区间（R4）。"""
+    """Wilson score interval -- the correct interval for small-sample proportions (R4)."""
     if n == 0:
         return (0.0, 0.0, 0.0)
     p = k / n
@@ -52,10 +55,10 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float, float]:
 
 
 def trackable_tokens(step) -> set[str]:
-    """该步观测里可用于 MC1 追踪的 token。
+    """Tokens in this step's observation usable for MC1 tracking.
 
-    优先用 def/class 定义名；若无（例如 sed 只取到 import 区），
-    退化为长标识符（>=6 字符），仍具区分力。
+    Prefer def/class definition names; if there are none (e.g. sed only captured the import
+    block), fall back to long identifiers (>=6 characters), which are still discriminative.
     """
     out = step.output_text or ""
     defs = set(_DEFS.findall(out))
@@ -66,12 +69,12 @@ def trackable_tokens(step) -> set[str]:
 
 
 def mc1(steps, t: int) -> dict:
-    """MC1：第 t 步观测的内容是否被后续步骤读取/引用。t 为 1-based。"""
+    """MC1: whether the content of step t's observation is read/referenced by later steps. t is 1-based."""
     if t < 1 or t > len(steps):
-        return {"ok": None, "why": "t 越界"}
+        return {"ok": None, "why": "t out of range"}
     toks = trackable_tokens(steps[t - 1])
     if not toks:
-        return {"ok": None, "why": "该步观测无可追踪 token"}
+        return {"ok": None, "why": "no trackable token in this step's observation"}
     later = " ".join((s.args_raw or "") + " " + (s.output_text or "")
                      for s in steps[t:])
     hit = sum(1 for x in toks if x in later)
@@ -83,16 +86,16 @@ def classify(rec: dict, steps) -> list[dict]:
     for s in rec.get("causal_segments", []):
         t, d = s.get("t"), s.get("delta")
         if t is None or d is None:
-            out.append({"t": t, "state": "INESTIMABLE", "why": "缺 t/delta"})
+            out.append({"t": t, "state": "INESTIMABLE", "why": "missing t/delta"})
             continue
         c = mc1(steps, t)
         if c["ok"] is None:
             out.append({"t": t, "state": "INESTIMABLE", "delta": d,
-                        "why": "MC1 不可判定：" + c["why"]})
+                        "why": "MC1 undecidable: " + c["why"]})
         elif not c["ok"]:
             out.append({"t": t, "state": "INESTIMABLE", "delta": d,
                         "n_tokens": c["n_tokens"],
-                        "why": "MC1 未通过（early-assimilation failure）"})
+                        "why": "MC1 not passed (early-assimilation failure)"})
         else:
             out.append({"t": t,
                         "state": "NO_EFFECT" if abs(d) < 1e-9 else "EFFECT",
@@ -141,7 +144,7 @@ def main() -> int:
             why = s.get("why", "")
             if "early-assimilation" in why:
                 early_fail += 1
-            elif "不可判定" in why:
+            elif "undecidable" in why:
                 undecidable += 1
         rows.append({"instance_id": r["instance_id"], "Y": y, "segments": segs})
 
@@ -162,21 +165,21 @@ def main() -> int:
                                   "mc1_undecidable": undecidable},
         "by_outcome": {("succeeded" if k == 1 else "failed"): dict(v)
                        for k, v in by_outcome.items()},
-        "note": ("RFEval 式记账：INESTIMABLE 出分母并上报 coverage；"
-                 "NO_EFFECT 入分母记零效应。旧 degenerate 字段把两者混同。"),
+        "note": ("RFEval-style accounting: INESTIMABLE leaves the denominator and coverage is reported; "
+                 "NO_EFFECT enters the denominator as zero effect. The old degenerate field conflated both."),
         "episodes": rows,
     }
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
 
-    print(f"=== 三态记账（{len(rows)} episode, {tot} 段）===")
+    print(f"=== three-state accounting ({len(rows)} episodes, {tot} segments) ===")
     for k in ("EFFECT", "NO_EFFECT", "INESTIMABLE"):
         v = states[k]
         print(f"  {k:<12} {v:>4}  {v/tot:.1%}" if tot else f"  {k}: 0")
-    print(f"\n可估计覆盖率 {p:.1%}  Wilson CI {[lo, hi]}  ({est}/{tot})")
-    print(f"可估计段中有效应率 {pe:.1%}  Wilson CI {[ple, phe]}")
-    print(f"INESTIMABLE 构成: early-assimilation {early_fail}, 不可判定 {undecidable}")
-    print("\n按结果分层:")
+    print(f"\nestimable coverage {p:.1%}  Wilson CI {[lo, hi]}  ({est}/{tot})")
+    print(f"effect rate among estimable segments {pe:.1%}  Wilson CI {[ple, phe]}")
+    print(f"INESTIMABLE breakdown: early-assimilation {early_fail}, undecidable {undecidable}")
+    print("\nstratified by outcome:")
     for k, v in res["by_outcome"].items():
         print(f"  {k:<10} {dict(v)}")
     print(f"\n→ {args.out}")

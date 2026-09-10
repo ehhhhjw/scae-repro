@@ -1,24 +1,26 @@
-"""V3：next-step 预测重做 —— 双通道分解（工具 × 对象）。零 API。
+"""V3: next-step prediction redone -- dual-channel decomposition (tool × object). Zero API.
 
-首轮 next-step 为何失败
-----------------------
-三种设置全部输给 repeat-prev（0.354/0.307/0.220 vs 0.371/0.294/0.236），
-候选覆盖率仅 48%。根因：候选集是**字符串路径集合**，路径跨 repo 不存在，
-且未建模"步与步之间为什么这样衔接"。
+Why the first round of next-step failed
+---------------------------------------
+All three settings lost to repeat-prev (0.354/0.307/0.220 vs 0.371/0.294/0.236),
+candidate coverage only 48%. Root cause: the candidate set was a **set of string paths**,
+paths do not exist across repos, and "why one step follows another" was not modeled.
 
-本次改动
---------
-按双通道分解 P(u_{t+1}) = P(tool_{t+1}|·) · P(obj_{t+1}|obj_t, G)：
-  工具分量  用 V1' 的官方 6 类条件转移模型（已验证 top-1 56.6%）
-  对象分量  候选集改为**代码图结构邻域**：
-             L1 一跳邻居 / L2 同社区 / L3 其余
-           打分用结构先验（W_L1=0.62 等，由 E3 实测相邻步图距离定出）
+Changes in this round
+---------------------
+Dual-channel decomposition P(u_{t+1}) = P(tool_{t+1}|·) · P(obj_{t+1}|obj_t, G):
+  tool component    the official 6-class conditional transition model of V1' (verified top-1 56.6%)
+  object component  candidate set replaced by the **structural neighborhood of the code graph**:
+                      L1 one-hop neighbors / L2 same community / L3 the rest
+                    scored with structural priors (W_L1=0.62 etc., fixed from E3 measurements
+                    of graph distance between adjacent steps)
 
-评估
-----
-同 repo 内 leave-one-episode-out（next-step 的正确设置：实际用途是在当前
-仓库里预测下一步，不需要跨仓库迁移）。指标 top-1/top-3/MRR + 候选覆盖率。
-基线：repeat-prev（曾击败我们）、边际频率、随机。
+Evaluation
+----------
+Within-repo leave-one-episode-out (the correct setting for next-step: the actual use is
+predicting the next step inside the current repository, no cross-repository transfer needed).
+Metrics top-1/top-3/MRR + candidate coverage.
+Baselines: repeat-prev (which once beat us), marginal frequency, random.
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ from pilot.probes import task as T                                    # noqa: E4
 
 
 def load_episodes(runs_root: Path, graph_only: bool = True) -> list[dict]:
-    """载入 (tool, obj) 序列。graph_only=True 时只保留已构图的仓库。"""
+    """Load (tool, obj) sequences. With graph_only=True keep only repositories that have a graph."""
     insts = {i.instance_id: i for i in T.load_instances()}
     eps = []
     for f in sorted(runs_root.glob("shard*/rollouts/*.jsonl")):
@@ -68,10 +70,11 @@ def load_episodes(runs_root: Path, graph_only: bool = True) -> list[dict]:
 
 def obj_candidates(g, cur_node: str | None, seen: set[str],
                    topk_seen: int = 30) -> dict[str, float]:
-    """对象候选集 + 结构先验权重。
+    """Object candidate set + structural prior weights.
 
-    L1 一跳邻居 / L2 同社区 / L3 已访问过的（历史先验）
-    L3 用"已访问"而非"全仓库"，因为全仓库候选会把 top-1 稀释到无意义。
+    L1 one-hop neighbors / L2 same community / L3 already visited (history prior)
+    L3 uses "already visited" rather than "whole repository", because whole-repository
+    candidates dilute top-1 to the point of meaninglessness.
     """
     cands: dict[str, float] = {}
     if cur_node and not cur_node.startswith("dir:"):
@@ -85,7 +88,7 @@ def obj_candidates(g, cur_node: str | None, seen: set[str],
     for x in hist:
         cands[x] = cands.get(x, 0.0) + W_L3 / max(1, len(hist))
     if cur_node:
-        cands[cur_node] = cands.get(cur_node, 0.0) + W_L3 / 2   # 自重复先验
+        cands[cur_node] = cands.get(cur_node, 0.0) + W_L3 / 2   # self-repeat prior
     return cands
 
 
@@ -117,8 +120,8 @@ def main() -> int:
     for e in eps:
         by_repo[e["project"]].append(e)
     tool_vocab = sorted({s["tool"] for e in eps for s in e["seq"]})
-    print(f"载入 {len(eps)} episode（已构图仓库），"
-          f"{sum(len(e['seq'])-1 for e in eps)} 个步转移，工具 {len(tool_vocab)} 类")
+    print(f"loaded {len(eps)} episodes (repositories with a graph), "
+          f"{sum(len(e['seq'])-1 for e in eps)} step transitions, {len(tool_vocab)} tool classes")
 
     tot = h1 = h3 = 0
     rr = 0.0
@@ -140,12 +143,12 @@ def main() -> int:
                 cur, nxt = seq[t], seq[t + 1]
                 if cur["node"]:
                     seen.add(cur["node"])
-                # --- 工具分量 ---
+                # --- tool component ---
                 pt = {v: p_tool(tm, cur["tool"], v, tool_vocab) for v in tool_vocab}
                 tool_den += 1
                 if max(pt, key=pt.get) == nxt["tool"]:
                     tool_h1 += 1
-                # --- 对象分量 ---
+                # --- object component ---
                 if not nxt["node"]:
                     continue
                 cands = obj_candidates(g, cur["node"], seen)
@@ -153,7 +156,7 @@ def main() -> int:
                 if nxt["node"] not in cands:
                     continue
                 cov_num += 1
-                # 联合打分：P(tool) * P(obj)
+                # joint score: P(tool) * P(obj)
                 joint = {}
                 for node, w in cands.items():
                     joint[node] = w * pt.get(nxt["tool"], 1e-6)
@@ -172,7 +175,7 @@ def main() -> int:
                     base["marginal"] += 1
 
     if not tot:
-        print("无有效决策点")
+        print("no valid decision points")
         return 0
     res = {
         "setting": "within-repo LOO, dual-channel (tool x object-graph)",
@@ -183,19 +186,19 @@ def main() -> int:
         "baselines_top1": {k: round(v / tot, 4) for k, v in base.items()},
         "tool_component_top1": round(tool_h1 / max(1, tool_den), 4),
         "tool_component_n": tool_den,
-        "prior_result": {"note": "首轮三设置", "coverage": [0.4815, 0.6074, 0.9774],
+        "prior_result": {"note": "three settings of the first round", "coverage": [0.4815, 0.6074, 0.9774],
                          "top1": [0.354, 0.307, 0.220],
                          "repeat_prev": [0.371, 0.294, 0.236]},
     }
     Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2),
                               encoding="utf-8")
-    print(f"\n=== V3 双通道 next-step（{res['setting']}）===")
-    print(f"  决策点 {tot}   候选覆盖率 {res['candidate_coverage']}")
+    print(f"\n=== V3 dual-channel next-step ({res['setting']}) ===")
+    print(f"  decision points {tot}   candidate coverage {res['candidate_coverage']}")
     print(f"  top-1 {res['top1']}   top-3 {res['top3']}   MRR {res['MRR']}")
-    print(f"  基线 top-1: {res['baselines_top1']}")
-    print(f"  工具分量单独 top-1: {res['tool_component_top1']}")
-    print(f"\n  对比首轮: 覆盖率 48.2/60.7/97.7% → {res['candidate_coverage']:.1%}")
-    print(f"            top-1 0.354/0.307/0.220 → {res['top1']}")
+    print(f"  baseline top-1: {res['baselines_top1']}")
+    print(f"  tool component alone top-1: {res['tool_component_top1']}")
+    print(f"\n  vs first round: coverage 48.2/60.7/97.7% → {res['candidate_coverage']:.1%}")
+    print(f"                  top-1 0.354/0.307/0.220 → {res['top1']}")
     print(f"\n→ {args.out}")
     return 0
 

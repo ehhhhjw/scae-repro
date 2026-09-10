@@ -1,15 +1,16 @@
-# 历史编排脚本（已被 ../../scripts/ 取代）
+# Legacy orchestration scripts (superseded by ../../scripts/)
 
-这两个脚本是原始实验实际使用的编排入口，保留在此仅作**溯源参考**。
-它们引用了若干不随复现包分发的数据产物（`runs/sample40.txt`、`runs/upolicy_ids.txt`），
-直接运行会失败。请用 `scripts/` 下的分阶段脚本。
+These two scripts were the orchestration entry points actually used in the original experiments; they are kept
+here purely for **provenance reference**. They reference several data artifacts that are not shipped with the
+reproduction package (`runs/sample40.txt`, `runs/upolicy_ids.txt`), so running them directly will fail. Use the
+per-stage scripts under `scripts/` instead.
 
-| 历史脚本 | 对应的新入口 | 差异 |
+| Legacy script | Corresponding new entry point | Difference |
 |---|---|---|
-| `run_pilot.sh` | `scripts/00_smoke.sh` + `scripts/01_locate.sh` | 原脚本跑 40 实例分层样本（需 `sample40.txt`）；新脚本跑全量，小样本用 `SCAE_LIMIT` |
-| `run_remaining.sh` [1] | `scripts/01` + `scripts/05_upolicy.sh` + `scripts/02_attribution.sh` + `scripts/04` | 分片逻辑抽成 `setup/stage_attr_shards.py`；U_policy 抽成 `scripts/05` |
+| `run_pilot.sh` | `scripts/00_smoke.sh` + `scripts/01_locate.sh` | The old script ran a 40-instance stratified sample (needs `sample40.txt`); the new script runs the full set, with `SCAE_LIMIT` for a small sample |
+| `run_remaining.sh` [1] | `scripts/01` + `scripts/05_upolicy.sh` + `scripts/02_attribution.sh` + `scripts/04` | The sharding logic was extracted into `setup/stage_attr_shards.py`; U_policy was extracted into `scripts/05` |
 
-[1] `run_remaining.sh` 的第 3 步用 `multi[i::W]` 轮转分片并 symlink rollouts；
-`setup/stage_attr_shards.py` 改用 `shard_by_repo`（与定位阶段一致）。
-两者跑的实例集合相同（多文件筛选由 `run_attribution --multifile-only` 完成），
-只影响负载均衡，不影响结果。
+[1] Step 3 of `run_remaining.sh` shards round-robin with `multi[i::W]` and symlinks rollouts;
+`setup/stage_attr_shards.py` switches to `shard_by_repo` (consistent with the localization stage).
+Both run the same instance set (multi-file filtering is done by `run_attribution --multifile-only`),
+so this only affects load balancing, not the results.

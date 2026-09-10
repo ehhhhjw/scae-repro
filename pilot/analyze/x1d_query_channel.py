@@ -1,34 +1,39 @@
-"""X1d：query 类型真的不可预测，还是解析与建模造成的？零 API。
+"""X1d: is the query type genuinely unpredictable, or is it an artifact of parsing and modelling? Zero API.
 
-来由
-----
-X1c 报告 query 类型（21.6% 的步）top-3 = 0.029，并据此把"自由文本查询"写成
-next-action 预测的硬上界。但两处可疑：
+Background
+----------
+X1c reported top-3 = 0.029 for the query type (21.6% of steps) and on that basis wrote
+"free-text queries" up as a hard upper bound on next-action prediction. But two things are
+suspicious:
 
-**(a) 解析损坏。** `parsed_command.parse_segment` 用 `shlex.split`，它在
-`grep "a\\|b"` 这类未闭合引号上抛 ValueError，回退到 `seg.split()` 后**保留引号并按
-空格截断**。实测：`shlex.split` 在 26.6% 的命令分段上失败；query 对象里
-**75.4% 带残留引号或尾反斜杠**，**25.5% 退化成 `"def` / `"class` 这种通用片段**。
-其中 `"def` 单独出现 251 次 —— 一个高频对象本该好预测。
+**(a) Broken parsing.** `parsed_command.parse_segment` uses `shlex.split`, which raises
+ValueError on unclosed quotes such as `grep "a\\|b"`, and the fallback to `seg.split()`
+**keeps the quotes and truncates on whitespace**. Measured: `shlex.split` fails on 26.6% of
+command segments; among the query objects **75.4% carry residual quotes or a trailing
+backslash**, and **25.5% degenerate into generic fragments like `"def` / `"class`**.
+`"def` alone occurs 251 times -- a high-frequency object that ought to be easy to predict.
 
-**(b) 模型偏弱。** x1c 的 query 分量只用"最近 10 个 query 按新近度加权"。
-但 query 绝大多数是**标识符**（`in_bulk`、`formfield_for_foreignkey`、
-`supports_logical_xor`），其来源应是**问题描述**与**此前工具输出里出现的符号名**。
+**(b) Weak model.** The query component of x1c only uses "the last 10 queries weighted by
+recency". But the vast majority of queries are **identifiers** (`in_bulk`,
+`formfield_for_foreignkey`, `supports_logical_xor`), whose sources should be the **problem
+statement** and **symbol names appearing in earlier tool output**.
 
-本脚本做三件事
---------------
-  1. 修一个更稳健的 query 抽取器（不依赖 shlex 成功），量化修复前后的差异
-  2. 换更合适的候选生成：频次 + 问题描述标识符 + 输出中的符号名
-  3. 在**同一批点**上比较，判定 0.029 有多少归因于解析、多少归因于建模、
-     多少是真正的不可预测
+What this script does
+---------------------
+  1. Build a more robust query extractor (not dependent on shlex succeeding) and quantify the
+     difference before/after the repair
+  2. Swap in more appropriate candidate generation: frequency + problem-statement identifiers +
+     symbol names in the output
+  3. Compare on **the same set of points**, and determine how much of the 0.029 is attributable
+     to parsing, how much to modelling, and how much is genuinely unpredictable
 
-判据（预注册）
---------------
-| 结果 | 结论 |
+Criterion (pre-registered)
+--------------------------
+| Result | Conclusion |
 |---|---|
-| 修复后 top-3 显著上升 | 原 0.029 是**测量与建模产物**，论文关于"自由文本是硬上界"的表述须收窄 |
-| 仅解析修复就上升 | 归因于解析；`parsed_command` 需修，且影响所有用到 query 的分析 |
-| 两者都改后仍 ≈0.03 | query 确实不可预测，原结论成立且更稳固 |
+| top-3 rises significantly after the repair | the original 0.029 is a **measurement and modelling artifact**; the paper's phrasing about "free text is a hard upper bound" must be narrowed |
+| the parsing repair alone lifts it | attributable to parsing; `parsed_command` needs fixing, and it affects every analysis that uses query |
+| still ≈0.03 after changing both | query really is unpredictable, the original conclusion holds and is more solid |
 """
 
 from __future__ import annotations
@@ -52,9 +57,9 @@ from pilot.analyze.v3j_trace_graph import boot_ci, paired_ci      # noqa: E402
 
 KS = (1, 3, 5, 10, 20)
 SEARCH_HEADS = {"grep", "rg", "egrep", "fgrep", "ag", "ack"}
-# 标识符：Python 风格的名字，含点号属性访问
+# identifier: Python-style name, including dotted attribute access
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
-# 输出里的定义行
+# definition lines in the output
 DEFN = re.compile(r"^\s*(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)", re.M)
 STOP = {"def", "class", "import", "from", "return", "if", "for", "while", "self",
         "None", "True", "False", "and", "or", "not", "in", "is", "as", "with",
@@ -63,10 +68,11 @@ STOP = {"def", "class", "import", "from", "return", "if", "for", "while", "self"
 
 
 def repair_query(cmd: str) -> str | None:
-    """从命令里稳健地取出搜索模式，不依赖 shlex 成功。
+    """Robustly pull the search pattern out of a command, without relying on shlex succeeding.
 
-    优先取**引号内的完整内容**（这是 shlex 失败时丢掉的东西），
-    否则取第一个非选项 token。再去掉正则元字符与转义，留下核心标识符。
+    Prefers **the full content inside quotes** (exactly what shlex drops when it fails),
+    otherwise takes the first non-option token. Then strips regex metacharacters and escapes,
+    leaving the core identifiers.
     """
     for seg in re.split(r"\|\||&&|;", cmd):
         toks = seg.strip().split()
@@ -75,7 +81,7 @@ def repair_query(cmd: str) -> str | None:
         head = toks[0].split("/")[-1]
         if head not in SEARCH_HEADS:
             continue
-        # 引号内内容：允许内部含 \| 等未闭合语法
+        # quoted content: tolerates unclosed syntax such as \| inside
         m = re.search(r'"([^"]*)"|\'([^\']*)\'', seg)
         raw = (m.group(1) or m.group(2)) if m else None
         if raw is None:
@@ -90,7 +96,7 @@ def repair_query(cmd: str) -> str | None:
 
 
 def core_idents(raw: str) -> list[str]:
-    """把一个搜索模式化成它包含的标识符（去掉正则与停用词）。"""
+    """Reduce a search pattern to the identifiers it contains (dropping regex and stop words)."""
     out = []
     for m in IDENT.finditer(raw):
         w = m.group(0)
@@ -102,7 +108,7 @@ def core_idents(raw: str) -> list[str]:
 
 
 def norm_query(raw: str) -> str:
-    """规范化后的 query 键：优先用核心标识符拼接，否则用清理后的原串。"""
+    """Normalized query key: prefer joining the core identifiers, otherwise the cleaned raw string."""
     ci = core_idents(raw)
     if ci:
         return "q:" + "|".join(ci)
@@ -151,9 +157,9 @@ def main() -> int:
     args = ap.parse_args()
 
     eps = load(Path(args.runs_root))
-    print(f"载入 {len(eps)} episode")
+    print(f"loaded {len(eps)} episodes")
 
-    # ---- 解析修复的规模 ----
+    # ---- scale of the parsing repair ----
     n_old = n_new = n_damaged = 0
     old_ctr: Counter = Counter()
     new_ctr: Counter = Counter()
@@ -184,10 +190,10 @@ def main() -> int:
             continue
         for hi, held in enumerate(group):
             train = [x for j, x in enumerate(group) if j != hi]
-            # 训练集里的 query 边际频次（LOO）
+            # marginal query frequencies in the training set (LOO)
             tr_new = Counter(s["new_q"] for x in train for s in x["seq"] if s["new_q"])
             tr_old = Counter(s["old_q"] for x in train for s in x["seq"] if s["old_q"])
-            # 问题描述里的标识符
+            # identifiers in the problem statement
             pids = [w for w in core_idents(held["problem"])][:200]
             seq = held["seq"]
             hist_new: list[str] = []
@@ -260,8 +266,9 @@ def main() -> int:
             "distinct_old": len(old_ctr), "distinct_new": len(new_ctr),
             "top_old_fragments": old_ctr.most_common(6),
             "top_new_keys": new_ctr.most_common(6),
-            "note": "old 是 parsed_command 现状（shlex 失败即回退按空格切），"
-                    "new 是本脚本的稳健抽取 + 标识符规范化",
+            "note": "old is parsed_command as it stands (falls back to splitting on whitespace "
+                    "when shlex fails), new is this script's robust extraction + identifier "
+                    "normalization",
         },
         "MODELS": {
             m: {"coverage": round(statistics.mean(cov[m]), 4),
@@ -288,28 +295,28 @@ def main() -> int:
                               encoding="utf-8")
 
     pr = res["PARSING_REPAIR"]
-    print(f"\n=== 解析修复的规模 ===")
-    print(f"  query 对象 old={pr['n_query_objects_old']} new={pr['n_query_objects_new']}")
-    print(f"  old 中受损比例 {pr['damaged_share_old']:.1%}")
-    print(f"  不同取值 old={pr['distinct_old']} new={pr['distinct_new']}")
-    print(f"  old 最常见片段: {pr['top_old_fragments'][:4]}")
-    print(f"  new 最常见键:   {pr['top_new_keys'][:4]}")
+    print(f"\n=== scale of the parsing repair ===")
+    print(f"  query objects old={pr['n_query_objects_old']} new={pr['n_query_objects_new']}")
+    print(f"  damaged share in old {pr['damaged_share_old']:.1%}")
+    print(f"  distinct values old={pr['distinct_old']} new={pr['distinct_new']}")
+    print(f"  most common old fragments: {pr['top_old_fragments'][:4]}")
+    print(f"  most common new keys:      {pr['top_new_keys'][:4]}")
 
-    print(f"\n=== 模型对比（query 步，n={n_pts}）===")
-    print(f"{'模型':<38}{'覆盖':>8}{'top1':>8}{'top3':>8}{'top10':>8}{'有效候选':>9}")
+    print(f"\n=== model comparison (query steps, n={n_pts}) ===")
+    print(f"{'model':<38}{'coverage':>8}{'top1':>8}{'top3':>8}{'top10':>8}{'eff_cand':>9}")
     for m in MODELS:
         d = res["MODELS"][m]
         print(f"{m:<38}{d['coverage']:>8.4f}{d['topk']['top1']['mean']:>8.4f}"
               f"{d['topk']['top3']['mean']:>8.4f}{d['topk']['top10']['mean']:>8.4f}"
               f"{str(d['eff_candidates']):>9}")
 
-    print(f"\n=== 归因分解（配对，top-3）===")
+    print(f"\n=== attribution decomposition (paired, top-3) ===")
     for k, v in res["CONTRASTS"].items():
         if "note" in v:
             print(f"  {k:<52} {v['note']}")
             continue
         print(f"  {k:<52} {v['diff']:+.4f} CI[{v['ci95'][0]:+.4f}, "
-              f"{v['ci95'][1]:+.4f}]  {'显著' if v['significant'] else '不显著'}")
+              f"{v['ci95'][1]:+.4f}]  {'significant' if v['significant'] else 'not significant'}")
     print(f"\n→ {args.out}")
     return 0
 

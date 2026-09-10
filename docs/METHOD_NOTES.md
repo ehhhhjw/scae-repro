@@ -1,12 +1,12 @@
-# 方法实现说明
+# Method Implementation Notes
 
-把论文的形式化对应到具体代码位置，便于核查实现是否忠于定义。
+Maps the paper's formalism onto concrete code locations, so that the implementation can be checked against the definitions.
 
 ---
 
-## 1. 结构因果模型与可识别性
+## 1. Structural causal model and identifiability
 
-论文的 SCM（式 2–4）：
+The paper's SCM (Eqs. 2-4):
 
 ```
 A_t := argmax_k ( log π_k(S_t) + G^(t)_{π,k} ),   G^(t)_{π,k} ~ Gumbel(0,1)
@@ -15,172 +15,172 @@ S_{t+1} := T(S_t, A_t, O_t),   S_1 := σ(q, sys)
 F̂ := φ(S_T),   Y := 1[F* ⊆ F̂]
 ```
 
-**Proposition 1（构造性序列随机化）**：在假设 1–3 下，
-`A_t ⊥ (Z, U^(≥t)) | τ_{1:t−1}`，于是
+**Proposition 1 (constructive sequential randomization)**: under Assumptions 1-3,
+`A_t ⊥ (Z, U^(≥t)) | τ_{1:t−1}`, hence
 
 ```
 E[Y | τ_{1:t−1}, do(A_t = a)] = E[Y | τ_{1:t−1}, A_t = a]
 ```
 
-代码对应：
+Code correspondence:
 
-| 形式化 | 代码 |
+| Formalism | Code |
 |---|---|
-| 条件于实现的前缀 τ_{1:t−1} | `rollout.truncate_before_step(items, k)` |
-| Gumbel–max 的解码噪声外生 | 由服务端采样提供；**不可从轨迹检验**（论文明说这是结构性假设） |
-| 环境噪声 U_env 钉死 | `config/env_pin.sh` + `appserver.PINNED_ENV` |
-| 假设 3（可重放） | `analyze/replay_check.py` 实测 1.00 / 100 动作 |
-| 假设 1（上下文可观测） | `rollout.compaction_lines()` 实测 0 次压缩 |
+| Conditioning on the realized prefix τ_{1:t−1} | `rollout.truncate_before_step(items, k)` |
+| Exogeneity of Gumbel-max decoding noise | provided by server-side sampling; **not testable from traces** (the paper states plainly that this is a structural assumption) |
+| Environment noise U_env pinned | `config/env_pin.sh` + `appserver.PINNED_ENV` |
+| Assumption 3 (replayable) | `analyze/replay_check.py` measures 1.00 / 100 actions |
+| Assumption 1 (context observable) | `rollout.compaction_lines()` measures 0 compactions |
 
-**关键点**：这里不需要"无未测混杂"假设。策略只依赖我们也记录的上下文，
-解码噪声是解码器属性——所以条件于前缀就固定了 S_t，剩下的变异是外生的。
-论文因此说轨迹**按构造**就是序列随机化实验。
-
----
-
-## 2. anytime 值与精确可加分解
-
-定义 `v_t := E[Y | τ_{1:t}, q, G]`，增量 `Δ_t := v_t − v_{t−1}`。
-
-**Theorem 1**：`Σ_{t=1}^T Δ_t = v_T − v_0 = Y − E[Y | q, G]`
-
-即"episode 相对执行前预期的意外"被无残差地分配到各步。归因与预测是同一对象的两端：
-左端点 v_0 就是执行前预测。
-
-代码：`attribution/causal.py::causal_attribution`，`estimate_v` 用 m 次重放估每个 v_t。
-
-**实现上的诚实处**：`v_t` 只在 **5 个等距点**估计，不是每步。
-因此报告的是**段效应**，Σ Δ_t 不精确等于 v_T − v_0。
-论文明确**不**把可加性当证据来报（Appendix E.1），只把它当内部一致性检查。
-
-选等距点而非"连续尾部窗口"是刻意的：窗口集中在轨迹后段会污染 §5.7 依赖的位置比较。
+**Key point**: no "no unmeasured confounding" assumption is needed here. The policy depends only on context we also record,
+and decoding noise is a decoder property -- so conditioning on the prefix fixes S_t, and the remaining variation is exogenous.
+The paper therefore says the trace is **by construction** a sequentially randomized experiment.
 
 ---
 
-## 3. 混合估计器与 positivity
+## 2. Anytime value and exact additive decomposition
 
-估计器只在**局部动作分布仍有重叠**处有效。论文不假设 positivity，而是**测**它：
+Define `v_t := E[Y | τ_{1:t}, q, G]`, with incremental gain `Δ_t := v_t − v_{t−1}`.
+
+**Theorem 1**: `Σ_{t=1}^T Δ_t = v_T − v_0 = Y − E[Y | q, G]`
+
+That is, the episode's "surprise relative to the pre-execution expectation" is allocated across steps with no residual. Attribution and prediction are two ends of the same object:
+the left endpoint v_0 is exactly the pre-execution prediction.
+
+Code: `attribution/causal.py::causal_attribution`; `estimate_v` estimates each v_t with m replays.
+
+**An honest point about the implementation**: `v_t` is estimated only at **5 equally spaced points**, not at every step.
+What is reported is therefore **segment effects**, and Σ Δ_t does not exactly equal v_T − v_0.
+The paper explicitly does **not** report additivity as evidence (Appendix E.1), only as an internal consistency check.
+
+Choosing equally spaced points rather than a "contiguous tail window" is deliberate: windows concentrated in the late part of a trace would contaminate the positional comparison that §5.7 relies on.
+
+---
+
+## 3. Hybrid estimator and positivity
+
+The estimator is only valid where the **local action distribution still has overlap**. The paper does not assume positivity, it **measures** it:
 
 ```
 Ĥ(π̂_t) = − Σ_c π̂_t(c) log π̂_t(c),   π̂_t(c) = m⁻¹ Σ_i 1[bucket(A_t^(i)) = c]
 ```
 
-`bucket` 取 (工具, 目标对象) 层级，实现在 `rollout.action_bucket()`。
+`bucket` operates at the (tool, target object) granularity, implemented in `rollout.action_bucket()`.
 
-于是式 8 的两分支（`causal.py::hybrid_delta_at`）：
+Hence the two branches of Eq. 8 (`causal.py::hybrid_delta_at`):
 
 ```python
 if pi["high_entropy"] and pi["entropy"] > tau_H:
-    # 观测分支：重放仍有重叠 ⇒ Prop.1 直接适用
+    # Observational branch: replays still have overlap ⇒ Prop.1 applies directly
     delta = v_t - v_prev
 else:
-    # 干预分支：策略在该点近乎确定 ⇒ 代入邻近动作 a' 并真实执行
+    # Interventional branch: policy is near-deterministic at this point ⇒ substitute an adjacent action a' and execute for real
     delta = E[Y | τ, do(A_t=a')] - E[Y | τ, do(A_t=a_t)]
 ```
 
-**τ_H = 0** 是最宽松的阈值：只要 m 次重放里出现 ≥2 个不同动作就走观测分支。
-这使论文报告的"50% 探测点可观测识别"成为**上界**。
+**τ_H = 0** is the loosest possible threshold: as long as ≥2 distinct actions appear among the m replays, the observational branch is taken.
+This makes the paper's reported "50% of probe points observationally identified" an **upper bound**.
 
-**干预分支不是原策略下的观测识别**（假设 4）。它估的是"移动到一个在扰动策略 π̃ 下
-仍然可信的邻近动作"的效应。论文对每个估计**标注**它走了哪个分支，
-并在 Appendix B.4 把两类量放到因果阶梯的不同层（II.5 vs III）。
+**The interventional branch is not observational identification under the original policy** (Assumption 4). It estimates the effect of "moving to an adjacent action
+that remains plausible under the perturbed policy π̃". The paper **labels** each estimate with the branch it took,
+and in Appendix B.4 places the two kinds of quantity on different rungs of the causal ladder (II.5 vs III).
 
 ---
 
-## 4. 结果变量为什么用 recall
+## 4. Why the outcome variable is recall
 
-`Y` 二值时单目标实例几乎必然被解决 ⇒ 多数替代动作不改变指示函数 ⇒ Δ_t ≡ 0。
-论文用六个候选做**干预敏感度**筛选（配对效应 / 标准差，`analyze/x8_outcome_sensitivity.py`）：
+With binary `Y`, single-target instances are almost always solved ⇒ most substitute actions do not change the indicator ⇒ Δ_t ≡ 0.
+The paper screens six candidates by **intervention sensitivity** (paired effect / standard deviation, `analyze/x8_outcome_sensitivity.py`):
 
-| 候选 | 敏感度 | 可动比例 |
+| Candidate | Sensitivity | Movable fraction |
 |---|---|---|
 | **recall over F\*** | **2.505** | **98.6%** |
-| F₁ | 2.165 | — |
-| 二值成功 | 1.643 | 73.2% |
+| F₁ | 2.165 | -- |
+| Binary success | 1.643 | 73.2% |
 
-Theorem 1 只要求 Y **有界**，所以换成 `recall ∈ [0,1]` 或逐文件指示 `Y_f`
-不改变任何形式结论（Appendix B.6）。
+Theorem 1 only requires Y to be **bounded**, so switching to `recall ∈ [0,1]` or a per-file indicator `Y_f`
+changes none of the formal conclusions (Appendix B.6).
 
-代码：`probes/task.py::outcome()` 同时返回 `Y / Y_exact / Y_filtered / precision / recall / f1`。
+Code: `probes/task.py::outcome()` returns `Y / Y_exact / Y_filtered / precision / recall / f1` together.
 
 ---
 
-## 5. 三层不确定性分解
+## 5. Three-way uncertainty decomposition
 
 ```
 H[Y | q, G] = U_task + U_policy + U_model
 ```
 
-| 分量 | 类型 | 估计方式 | 蕴含的行动 |
+| Component | Type | Estimation | Implied action |
 |---|---|---|---|
-| `U_task` | 偶然、不可约 | 残差；图歧义协变量 | 找用户澄清 |
-| `U_policy` | 偶然、可约 | 固定 q 下的多次 rollout 间方差 | 重采样并聚合 |
-| `U_model` | 认知 | 经 link 传播的后验方差 | 弃答/升级/收数据 |
+| `U_task` | Aleatoric, irreducible | residual; graph-ambiguity covariates | ask the user for clarification |
+| `U_policy` | Aleatoric, reducible | between-rollout variance at fixed q | resample and aggregate |
+| `U_model` | Epistemic | posterior variance propagated through the link | abstain / escalate / collect data |
 
-代码：`uq/predictor.py::decompose_uncertainty`，v₀ 用
-`BayesianLogisticLaplace`（IRLS 求 MAP，Hessian 逆做 Laplace 协方差，
-probit 近似传播参数不确定性）。
+Code: `uq/predictor.py::decompose_uncertainty`; v₀ uses
+`BayesianLogisticLaplace` (IRLS for the MAP, inverse Hessian as the Laplace covariance,
+probit approximation to propagate parameter uncertainty).
 
-**论文对这一节的自我限定要读清楚**：三分解只在**合成生成过程**上验证（D.7），
-真轨迹上只有 `U_policy` 被直接估计（0.049，来自 23 个有 K=4 重复 rollout 的实例）。
-三项在真实轨迹上的**可识别性并未建立**。`analyze/uq_selftest.py` 是"带自检的规格说明"，
-不是对真数据的验证。
+**Read the paper's self-imposed limits on this section carefully**: the three-way decomposition is validated only on a **synthetic generative process** (D.7),
+and on real traces only `U_policy` is directly estimated (0.049, from 23 instances with K=4 repeated rollouts).
+**Identifiability of the three terms on real traces is not established.** `analyze/uq_selftest.py` is "a specification with a self-check",
+not a validation against real data.
 
-v₀ 的 7 个执行前协变量（`uq/features.py`）：issue 描述长度、显式点名文件数、
-是否含 traceback、错误词密度、仓库规模、不同标识符数、含这些标识符的仓库文件数
-（作为 `U_task` 的歧义代理）。**都不读轨迹**——否则会把执行期信息泄进一个"执行前"预测器。
+The 7 pre-execution covariates for v₀ (`uq/features.py`): issue description length, number of explicitly named files,
+whether a traceback is present, error term density, repository size, number of distinct identifiers, number of repository files containing those identifiers
+(as a proxy for `U_task` ambiguity). **None of them read the trace** -- otherwise execution-time information would leak into a "pre-execution" predictor.
 
 ---
 
-## 6. 碰撞偏差的识别设计
+## 6. Identification design for collider bias
 
-这是论文唯一"不需要我们自己的估计器正确"就能成立的对比。
+This is the only comparison in the paper that holds without requiring our own estimator to be correct.
 
-同一模型、同一 rubric，只改 judge 能看到的信息集：
+Same model, same rubric; only the information set visible to the judge is changed:
 
-| 条件 | 条件于 | 后果 |
+| Condition | Conditions on | Consequence |
 |---|---|---|
-| full-trace | 前缀 + **后继步骤** + **实现的结果 Y** | 条件于 A_t 的后代 ⇒ 打开非因果路径 |
-| prefix-only | 固定 60% 前缀，Y 隐藏 | 前缀条件化的对照臂 |
+| full-trace | prefix + **subsequent steps** + **realized outcome Y** | conditions on descendants of A_t ⇒ opens non-causal paths |
+| prefix-only | fixed 60% prefix, Y hidden | prefix-conditioned control arm |
 
-若 full-trace judge 在逼近一个前缀条件化的步局部量，这个操纵**不应**移动归责位置。
-实测位移 **+0.537**（sign test p = 1.1×10⁻¹⁶）。
+If the full-trace judge were approximating a prefix-conditioned step-local quantity, this manipulation **should not** move the blame position.
+Measured displacement is **+0.537** (sign test p = 1.1×10⁻¹⁶).
 
-**设计缺陷及其修正**（论文 E.2 如实记录）：最初的设计把 prefix-only 截断在
-"因果估计选中的那一步"之前。因为 judge 选不了它看不见的步，这会把 prefix-only 条件
-可达的位置压到比较点以下，**即使条件于后代毫无影响也会产生正位移**。
-修正后的设计用一个**事前固定、不依赖任何估计**的截断比例（60%）。
+**A design flaw and its correction** (faithfully recorded in paper E.2): the original design truncated prefix-only just before
+"the step selected by the causal estimate". Because the judge cannot select a step it cannot see, this pushes the positions reachable under the prefix-only condition
+below the comparison point, **producing a positive displacement even if conditioning on descendants had no effect at all**.
+The corrected design uses a truncation fraction (60%) that is **fixed in advance and independent of any estimate**.
 
-代码：`attribution/judge.py`（两个条件）+ `analyze/attribution_compare.py`（位移统计）。
-`--prefix-frac 0.6` 由 `harness/parallel.py` 写死，避免被误改。
-
----
-
-## 7. 统计约定（Appendix C.5）
-
-约定先定、全程一致，不允许看完结果再挑规则：
-
-- **置信区间** = episode 级或 instance 级 bootstrap
-- **零假设** = 期内置换 或 闭式期望，**绝不**用采样出来的随机基线
-- **排序指标** 用随机打破平局的闭式期望（计数式打分器平局极多）
-- **共同分母**：不同候选集大小的预测器，realized 对象落在集外记 miss 而非丢弃
-- **多重比较** BH-FDR，q = 0.10，区分探索性/验证性
-- **Wilcoxon** 在 n < 6 时拒绝给 p 值
-
-实现散落在各分析脚本内（刻意不抽成公共库：每个检验的零假设构造不同，
-抽象化会掩盖差异）。`v3g_regime.py` 导出了若干共用小工具
-（`rank_ge`、`exp_hit`、`exp_recip`、`eff_cand`、`ece`）。
+Code: `attribution/judge.py` (the two conditions) + `analyze/attribution_compare.py` (displacement statistics).
+`--prefix-frac 0.6` is hard-coded in `harness/parallel.py` to prevent accidental changes.
 
 ---
 
-## 8. 数据流可达性 ≠ 因果效应
+## 7. Statistical conventions (Appendix C.5)
 
-论文 Appendix B.7 特别澄清，因为这是个常见的替代判据：
+Conventions fixed up front and applied throughout; picking rules after seeing results is not allowed:
 
-- **无数据流但因果有力**：一个返回空的 `grep` 不向后续上下文贡献任何内容，
-  按数据流判据"惰性"；但它可能让 agent 放弃正确目录——**空结果本身就是信息**。
-  在本文的估计量下它表现为一个**大 \|Δ_t\|**。
-- **有数据流但因果惰性**：一次长文件读注入数千 token，却不改变任何后续动作。
-  固定前缀删掉这次读，重放验证：续跑不变 ⇒ 该步贡献为 0。
+- **Confidence intervals** = episode-level or instance-level bootstrap
+- **Null hypothesis** = within-episode permutation or closed-form expectation, **never** a sampled random baseline
+- **Ranking metrics** use the closed-form expectation under random tie-breaking (count-based scorers have very many ties)
+- **Common denominator**: for predictors with different candidate-set sizes, a realized object falling outside the set counts as a miss rather than being dropped
+- **Multiple comparisons** BH-FDR, q = 0.10, distinguishing exploratory / confirmatory
+- **Wilcoxon** refuses to give a p-value when n < 6
 
-所以按下游数据流给步打分的分类法，会**系统性错排**恰恰是因果判据认定为决定性的那些步。
+The implementation is scattered across the individual analysis scripts (deliberately not factored into a shared library: each test constructs its null hypothesis differently,
+and abstraction would obscure the differences). `v3g_regime.py` exports a few shared helpers
+(`rank_ge`, `exp_hit`, `exp_recip`, `eff_cand`, `ece`).
+
+---
+
+## 8. Dataflow reachability ≠ causal effect
+
+Paper Appendix B.7 clarifies this specifically, because it is a common substitute criterion:
+
+- **No dataflow yet causally powerful**: a `grep` that returns nothing contributes no content to the subsequent context,
+  and is "inert" by the dataflow criterion; but it may make the agent abandon the correct directory -- **an empty result is itself information**.
+  Under this paper's estimand it shows up as a large **\|Δ_t\|**.
+- **Dataflow present yet causally inert**: a long file read injects thousands of tokens but changes no subsequent action.
+  Fix the prefix, delete that read, and verify by replay: the continuation is unchanged ⇒ the step's contribution is 0.
+
+So taxonomies that score steps by downstream dataflow will **systematically misrank** precisely those steps that the causal criterion identifies as decisive.

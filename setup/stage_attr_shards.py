@@ -1,35 +1,37 @@
 #!/usr/bin/env python3
-"""为归因阶段准备分片目录。
+"""Prepare the shard directories for the attribution stage.
 
-背景
-----
-`pilot.harness.parallel --cmd attr` 不自己挑实例：它要求 `--out` 下已经存在
-`shard*/`，每个 shard 里有 `results.jsonl`（该分片负责的定位结果）和 `rollouts/`
-（可读到的 rollout JSONL）。原始实验里这步是手工做的，本脚本把它固定下来，
-使第 2 阶段可复现。
+Background
+----------
+`pilot.harness.parallel --cmd attr` does not pick instances itself: it requires that
+`shard*/` already exist under `--out`, each shard holding a `results.jsonl` (the
+localization results that shard is responsible for) and `rollouts/` (readable rollout
+JSONL). In the original experiment this step was done by hand; this script pins it down
+so that stage 2 is reproducible.
 
-做的事
-------
-1. 读定位阶段的结果（merged results.jsonl 或 shard*/results.jsonl）
-2. 按 instance_id 去重，只保留 ok 且能找到 rollout 的记录
-3. 按 repo 贪心分片（复用 pilot.harness.parallel.shard_by_repo，保证同一仓库
-   目录同一时刻只被一个 worker 使用）
-4. 每个 shard 写出 results.jsonl，并把 rollouts 软链（默认）或复制进去
+What it does
+------------
+1. Read the localization-stage results (merged results.jsonl or shard*/results.jsonl)
+2. Deduplicate by instance_id, keeping only records that are ok and have a locatable rollout
+3. Shard greedily by repo (reusing pilot.harness.parallel.shard_by_repo, which guarantees
+   a given repository directory is used by at most one worker at a time)
+4. Write results.jsonl per shard and symlink (default) or copy the rollouts into it
 
-用法
-----
-# 归因主样本（论文 D.10 的 70 episode，m=3，供 RQ5 judge 分析）
+Usage
+-----
+# main attribution sample (the 70 episodes of paper D.10, m=3, for the RQ5 judge analysis)
 python3 setup/stage_attr_shards.py --locate pilot/runs/full_locate \
     --out pilot/runs/full_attr --workers 6
 
-# m=8 子样本（论文 §5.6 的 190 估值点 / 38 episode，供 RQ4 步级功效分析）
+# m=8 subsample (the 190 estimation points / 38 episodes of paper §5.6, for the RQ4 step-level power analysis)
 python3 setup/stage_attr_shards.py --locate pilot/runs/full_locate \
     --out pilot/runs/v4prime --workers 6 --limit 38
 
-注意
+Note
 ----
-实例筛选（只留多文件实例）由 run_attribution 的 `--multifile-only` 完成，
-本脚本不预筛，以免和论文口径产生第二处真相来源。
+Instance filtering (keeping only multi-file instances) is done by run_attribution's
+`--multifile-only`; this script does not pre-filter, to avoid creating a second source
+of truth alongside the paper's definition.
 """
 
 from __future__ import annotations
@@ -49,7 +51,7 @@ from pilot.probes import task as T  # noqa: E402
 
 
 def load_locate(locate_dir: Path) -> dict[str, dict]:
-    """读定位结果，按 instance_id 去重（ok 记录优先）。"""
+    """Read localization results, deduplicating by instance_id (ok records win)."""
     files = [locate_dir / "results.jsonl"] + sorted(locate_dir.glob("shard*/results.jsonl"))
     uniq: dict[str, dict] = {}
     for f in files:
@@ -66,7 +68,7 @@ def load_locate(locate_dir: Path) -> dict[str, dict]:
             iid = r.get("instance_id")
             if not iid:
                 continue
-            # ok 记录优先；同为 ok 时保留步数更多的那条
+            # ok records win; among equally-ok records keep the one with more steps
             old = uniq.get(iid)
             if (
                 old is None
@@ -78,44 +80,44 @@ def load_locate(locate_dir: Path) -> dict[str, dict]:
 
 
 def find_rollouts(locate_dir: Path) -> dict[str, Path]:
-    """收集 instance_id -> rollout 路径（取步数最全的 k0）。"""
+    """Collect instance_id -> rollout path (taking the most complete k0)."""
     out: dict[str, Path] = {}
     for p in sorted(locate_dir.glob("shard*/rollouts/*.jsonl")) + sorted(
         locate_dir.glob("rollouts/*.jsonl")
     ):
         iid = p.name.split("__k")[0]
-        # 同名多份时保留更大的（更完整）
+        # with several copies of the same name keep the larger (more complete) one
         if iid not in out or p.stat().st_size > out[iid].stat().st_size:
             out[iid] = p
     return out
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="准备归因分片目录")
+    ap = argparse.ArgumentParser(description="Prepare attribution shard directories")
     ap.add_argument("--locate", type=Path, default=REPO_ROOT / "pilot" / "runs" / "full_locate")
-    ap.add_argument("--out", type=Path, required=True, help="归因输出根目录，如 pilot/runs/full_attr")
-    ap.add_argument("--workers", type=int, default=6, help="分片数（= 并行 worker 数）")
-    ap.add_argument("--limit", type=int, default=0, help="只取前 N 个多文件实例（m=8 子样本用）")
-    ap.add_argument("--copy", action="store_true", help="复制 rollouts 而非软链（默认软链省磁盘）")
-    ap.add_argument("--force", action="store_true", help="覆盖已存在的 shard 目录")
+    ap.add_argument("--out", type=Path, required=True, help="attribution output root, e.g. pilot/runs/full_attr")
+    ap.add_argument("--workers", type=int, default=6, help="number of shards (= number of parallel workers)")
+    ap.add_argument("--limit", type=int, default=0, help="take only the first N multi-file instances (for the m=8 subsample)")
+    ap.add_argument("--copy", action="store_true", help="copy rollouts instead of symlinking (symlink is the default, to save disk)")
+    ap.add_argument("--force", action="store_true", help="overwrite existing shard directories")
     args = ap.parse_args()
 
     if not args.locate.exists():
-        sys.exit(f"找不到定位结果目录 {args.locate}，先跑 scripts/01_locate.sh")
+        sys.exit(f"localization results directory {args.locate} not found; run scripts/01_locate.sh first")
 
     uniq = load_locate(args.locate)
     rollouts = find_rollouts(args.locate)
     if not uniq:
-        sys.exit(f"{args.locate} 下没读到任何定位结果。")
+        sys.exit(f"no localization results read under {args.locate}.")
     if not rollouts:
-        sys.exit(f"{args.locate} 下没找到 rollouts/*.jsonl —— 归因需要 rollout 才能重放前缀。")
+        sys.exit(f"no rollouts/*.jsonl found under {args.locate} -- attribution needs rollouts to replay prefixes.")
 
-    # 只保留 ok 且有 rollout 的
+    # keep only records that are ok and have a rollout
     usable = {i: r for i, r in uniq.items() if r.get("ok") and i in rollouts}
     dropped_notok = sum(1 for r in uniq.values() if not r.get("ok"))
     dropped_noroll = sum(1 for i, r in uniq.items() if r.get("ok") and i not in rollouts)
 
-    # 多文件统计（供核对论文口径；实际筛选由 --multifile-only 做）
+    # multi-file count (for cross-checking the paper's definition; the actual filtering is done by --multifile-only)
     try:
         gold = {i.instance_id: i.gold for i in T.load_instances()}
         multi = [i for i in usable if len(gold.get(i, ())) > 1]
@@ -124,20 +126,20 @@ def main() -> None:
 
     ids = sorted(usable)
     if args.limit > 0:
-        # 子样本按多文件优先取，保证 --multifile-only 之后还有足够 episode
+        # take multi-file instances first, so enough episodes survive --multifile-only
         prefer = sorted(multi) if multi else ids
         ids = prefer[: args.limit]
 
-    print(f"定位结果   {len(uniq)} 唯一实例")
-    print(f"  可用     {len(usable)}（丢弃：非 ok {dropped_notok}，无 rollout {dropped_noroll}）")
+    print(f"localization  {len(uniq)} unique instances")
+    print(f"  usable      {len(usable)} (dropped: not ok {dropped_notok}, no rollout {dropped_noroll})")
     if multi:
-        print(f"  多文件   {len(multi)}  ← 归因实际只跑这些（--multifile-only）")
-    print(f"本次分片   {len(ids)} 实例 → {args.workers} 个 shard")
+        print(f"  multi-file  {len(multi)}  ← attribution actually runs only these (--multifile-only)")
+    print(f"sharding now  {len(ids)} instances → {args.workers} shards")
 
     args.out.mkdir(parents=True, exist_ok=True)
     existing = sorted(args.out.glob("shard*"))
     if existing and not args.force:
-        sys.exit(f"{args.out} 下已有 {len(existing)} 个 shard 目录。加 --force 覆盖。")
+        sys.exit(f"{args.out} already holds {len(existing)} shard directories. Pass --force to overwrite.")
     for d in existing:
         shutil.rmtree(d)
 
@@ -149,7 +151,7 @@ def main() -> None:
         with open(sdir / "results.jsonl", "w", encoding="utf-8") as fh:
             for iid in sids:
                 fh.write(json.dumps(usable[iid], ensure_ascii=False) + "\n")
-        # rollouts：归因要能按 instance 找到 rollout，链全量最省事也最安全
+        # rollouts: attribution must find a rollout per instance; linking all of them is simplest and safest
         for iid in sids:
             src = rollouts[iid].resolve()
             dst = sdir / "rollouts" / rollouts[iid].name
@@ -160,11 +162,11 @@ def main() -> None:
             else:
                 os.symlink(src, dst)
             total_links += 1
-        print(f"  shard{i}: {len(sids)} 实例 → {sdir}")
+        print(f"  shard{i}: {len(sids)} instances → {sdir}")
 
-    mode = "复制" if args.copy else "软链"
-    print(f"\n完成：{len(shards)} 个 shard，{total_links} 个 rollout（{mode}）")
-    print(f"下一步：bash scripts/02_attribution.sh  （或直接 python3 -m pilot.harness.parallel --cmd attr --out {args.out} ...）")
+    mode = "copy" if args.copy else "symlink"
+    print(f"\ndone: {len(shards)} shards, {total_links} rollouts ({mode})")
+    print(f"next: bash scripts/02_attribution.sh  (or directly python3 -m pilot.harness.parallel --cmd attr --out {args.out} ...)")
 
 
 if __name__ == "__main__":
